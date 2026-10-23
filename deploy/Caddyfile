@@ -1,0 +1,5 @@
+{$SONAR_DOMAIN} {
+    reverse_proxy sonar:8000 {
+        flush_interval -1
+    }
+}

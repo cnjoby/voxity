@@ -1,13 +1,13 @@
 # 声呐 Sonar｜三端接口契约 v1
 
-日期：2026-10-23。设计约定，尚无可用服务器；路径、JSON 样例和状态供 AI 实现与模拟使用。产品职责见[架构](../design/architecture.md)，开发入口见[两天计划](../../two-day-development.md)。本文是字段、枚举与失败行为的唯一开发依据。
+日期：2026-10-23。服务端已有[本机运行实现](../../server/README.md)，真实平台、部署和设备仍待验收；静态 JSON 样例供客户端模拟使用。产品职责见[架构](../design/architecture.md)，开发入口见[两天计划](../../two-day-development.md)。本文是字段、枚举与失败行为的唯一开发依据。
 
 ## 1. 共同约定
 
 - 配置名 `SONAR_BASE_URL`，部署时填真实 HTTPS 地址；不在文档或源码放实际密钥。
 - Sonar 请求使用 `Authorization: Bearer <device_token>`，服务端映射本人，不接收客户端指定权限主体。设备 Token 与 Linx Token 分开。
 - JSON 使用 UTF-8、snake_case；时间为 UTC RFC3339；ID 为服务端生成的不透明字符串。客户端生成并持久化 UUID `client_request_id` 标识一条录音，网络重试沿用。
-- 演示用户：`alice`（Android）、`bob`（ESP32）。地点：`zhonghuan_jinke`（中环路金科路口）、`demo_approach`（提问者模拟接近区域）；方向固定 `demo_exit`。目标地点独立于本人位置。
+- 演示用户：`alice`（Android）、`bob`（ESP32）。本人位置：`zhonghuan_jinke`（中环路金科路口）或 `demo_approach`（提问者模拟接近区域）；提问目标固定为 `zhonghuan_jinke`，方向固定 `demo_exit`。目标地点独立于本人位置。
 - 模式 `listen | quiet`；类型 `question | answer`。一期不实现额外分享类型。
 - 每人一个主终端、一次一条待处理录音、一个未结束提问；完成或取消后才能新建问题。连续演示使用新录音ID，不复用旧问题。
 - 演示默认：问题有效期 120 秒、邀请有效期 30 秒、位置有效期 600 秒、feed 请求有效期 30 秒、回答音频待听有效期为发布后 24 小时。均服务端可配，邀请不晚于问题截止；回答待听期限独立于问题期限，不代表真实道路验证指标。

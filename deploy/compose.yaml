@@ -1,0 +1,33 @@
+services:
+  sonar:
+    build: ../server
+    env_file: ../server/.env
+    environment:
+      SONAR_DATA_DIR: /data
+    volumes:
+      - sonar_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/app/.venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+  proxy:
+    image: caddy:2
+    environment:
+      SONAR_DOMAIN: ${SONAR_DOMAIN:?Set SONAR_DOMAIN to the real public hostname}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      sonar:
+        condition: service_healthy
+    restart: unless-stopped
+volumes:
+  sonar_data:
+  caddy_data:
+  caddy_config:

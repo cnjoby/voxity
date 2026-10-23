@@ -1,0 +1,12 @@
+# Local credentials and machine state
+.env
+.env.*
+!.env.example
+.DS_Store
+__pycache__/
+*.pyc
+.ruff_cache/
+.pytest_cache/
+
+# Generated presentation output and local deliverables
+/output/
