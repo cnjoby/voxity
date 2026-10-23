@@ -1,0 +1,19 @@
+{
+  "profile": {
+    "user_id": "bob",
+    "presence": {
+      "place_id": "zhonghuan_jinke",
+      "direction": "demo_exit",
+      "source": "simulated",
+      "updated_at": "2026-10-23T02:00:00Z"
+    },
+    "assist_enabled": true,
+    "mode": "listen",
+    "focus": "愿意回答附近路口的拥堵问题",
+    "revision": 1
+  },
+  "device_id": "device_bob_demo",
+  "linx_agent_id": "agent_bob_placeholder",
+  "recent_question_ids": [],
+  "server_time": "2026-10-23T02:00:00Z"
+}

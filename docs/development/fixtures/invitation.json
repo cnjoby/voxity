@@ -1,0 +1,19 @@
+{
+  "id": "d_invite_001",
+  "type": "invitation",
+  "question_id": "q_demo_001",
+  "request_id": "r_invite_001",
+  "profile_revision": 1,
+  "state": "pending",
+  "expires_at": "2026-10-23T02:00:30Z",
+  "actionable": true,
+  "reason_code": "ELIGIBLE",
+  "payload": {
+    "transcript": "现在中环路金科路口堵不堵？",
+    "place_id": "zhonghuan_jinke",
+    "place_name": "中环路金科路口",
+    "direction": "demo_exit",
+    "prompt_key": "onsite_question",
+    "question_audio_url": "/v1/audio/q_demo_001"
+  }
+}

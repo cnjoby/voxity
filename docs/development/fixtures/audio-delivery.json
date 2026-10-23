@@ -1,0 +1,18 @@
+{
+  "id": "d_audio_001",
+  "type": "audio",
+  "question_id": "q_demo_001",
+  "request_id": "r_audio_001",
+  "profile_revision": 1,
+  "state": "pending",
+  "expires_at": "2026-10-24T02:00:20Z",
+  "actionable": true,
+  "reason_code": "ELIGIBLE",
+  "payload": {
+    "post_id": "a_demo_001",
+    "transcript": "好堵啊，下匝道都要十五分钟。",
+    "author_label": "附近参与者 B",
+    "published_at": "2026-10-23T02:00:20Z",
+    "audio_url": "/v1/audio/a_demo_001"
+  }
+}
