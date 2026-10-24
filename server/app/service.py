@@ -8,6 +8,7 @@ from .audio import validate_wav
 from .config import Settings
 from .decision import BambooDecision
 from .errors import Problem
+from .exchange import ExchangeDecider, ExchangeRules
 from .geo import AMap, distance_m, sampled_epoch
 from .models import AnswerDraft, Context, QuestionDraft, ReplyDraft, VoiceDraft
 from .storage import Database, digest
@@ -26,7 +27,7 @@ def ident(prefix):
     return f"{prefix}_{secrets.token_hex(12)}"
 
 
-class Service(VoiceRules):
+class Service(ExchangeRules, VoiceRules):
     def __init__(self, settings: Settings, clock=time.time):
         self.settings = settings
         self.clock = clock
@@ -34,6 +35,7 @@ class Service(VoiceRules):
         self.feeds = {}
         self.geo = AMap(settings.amap_key)
         self.decider = BambooDecision(settings.bamboo_api_key, settings.bamboo_base_url)
+        self.exchange_decider = ExchangeDecider(settings)
         self.migrate_legacy_focus()
 
     @contextmanager

@@ -1,7 +1,9 @@
 package com.sonar.app
 
 import android.app.Application
+import android.content.Intent
 import android.os.SystemClock
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import java.io.File
@@ -13,6 +15,7 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -63,6 +66,8 @@ class SonarViewModel(app: Application) : AndroidViewModel(app) {
     private var playerJob: Job? = null
     private var recordingJob: Job? = null
     private var foreground = false
+    private var uiVisible = false
+    private var automaticAudioSuspended = ExchangeRuntime.state.value.owned
     private var generation = 0
     private var pendingMode: String? = null
     private var presenceConfirmed = false
@@ -81,9 +86,53 @@ class SonarViewModel(app: Application) : AndroidViewModel(app) {
         runCatching { configStore.load() }
             .onSuccess { configure(it, false) }
             .onFailure { e -> mutable.update { it.copy(message = e.message ?: "读取配置失败") } }
+        viewModelScope.launch {
+            var owned = ExchangeRuntime.state.value.owned
+            ExchangeRuntime.state.collect { current ->
+                if (owned && !current.owned) {
+                    if (current.lastKind == "question" && current.lastPostId != null) {
+                        store.questionId = current.lastPostId
+                        mutable.update { it.copy(question = null) }
+                    }
+                    if (uiVisible) activate()
+                }
+                owned = current.owned
+            }
+        }
+    }
+
+    fun startExchange(autoPublish: Boolean, autoPlay: Boolean) {
+        val s = mutable.value
+        if (ExchangeRuntime.state.value.owned) return
+        if (s.draft != null || s.recording || s.transcribing || s.busy || s.linx.busy) {
+            notice("先在停车时处理当前录音或草稿，再开启现场交流")
+            return
+        }
+        val target = s.selectedPlace ?: run { notice("请先定位或选择交流地点"); return }
+        if (!s.connected || config.mock || config.debugTranscript || config.simulatedLocation || config.testPlaceId.isNotBlank()) {
+            notice("请先连接真实服务，退出模拟位置与手动转写")
+            return
+        }
+        if (s.quiet) { notice("当前已安静，请先恢复收听"); return }
+        if (!phoneLocation.permitted()) { notice("请先允许手机真实定位，再开启现场交流"); return }
+        if (autoPublish && config.linxToken.isBlank()) { notice("请先在我的页面绑定灵矽"); return }
+        automaticAudioSuspended = true
+        store.automaticAudioSuspended = true
+        val visible = uiVisible
+        pause()
+        uiVisible = visible
+        ExchangeRuntime.mutable.value = ExchangeState(owned = true, phase = "starting", place = target.label, message = "正在开启本次交流")
+        runCatching {
+            ContextCompat.startForegroundService(getApplication(), Intent(getApplication(), ExchangeService::class.java)
+                .setAction(ExchangeService.START).putExtra("place_id", target.id).putExtra("place_label", target.label)
+                .putExtra("auto_publish", autoPublish).putExtra("auto_play", autoPlay))
+        }.onFailure {
+            ExchangeRuntime.mutable.value = ExchangeState(phase = "unavailable", message = "系统未允许开启麦克风，请停车后重试")
+        }
     }
 
     fun configure(next: DeviceConfig, save: Boolean = true) {
+        if (save && ExchangeRuntime.state.value.owned) ExchangeService.command(getApplication(), ExchangeService.STOP)
         linxBindingJob?.cancel()
         linxVoiceJob?.cancel()
         polling?.cancel()
@@ -112,6 +161,7 @@ class SonarViewModel(app: Application) : AndroidViewModel(app) {
         manualTarget = config.testPlaceId.isNotBlank()
         if (save) configStore.save(config)
         store = TaskStore(getApplication(), config.scope)
+        automaticAudioSuspended = store.automaticAudioSuspended || ExchangeRuntime.state.value.owned
         pendingMode = store.pendingMode
         presenceConfirmed = false
         var connectionError: String? = null
@@ -150,6 +200,8 @@ class SonarViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun activate() {
+        uiVisible = true
+        if (ExchangeRuntime.state.value.owned) return
         foreground = true
         if (polling?.isActive == true || api == null) return
         if (!config.mock && !config.simulatedLocation) {
@@ -190,6 +242,8 @@ class SonarViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun pause() {
+        uiVisible = false
+        if (ExchangeRuntime.state.value.owned) return
         foreground = false
         linxVoiceJob?.cancel()
         linxBindingJob?.cancel()
@@ -283,7 +337,8 @@ class SonarViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         if (
-            audio.gate.mode == AudioMode.IDLE &&
+            !automaticAudioSuspended &&
+                audio.gate.mode == AudioMode.IDLE &&
                 !mutable.value.busy &&
                 !mutable.value.linx.busy &&
                 !mutable.value.recording &&
@@ -519,6 +574,10 @@ class SonarViewModel(app: Application) : AndroidViewModel(app) {
         }
 
     fun toggleQuiet() {
+        if (ExchangeRuntime.state.value.owned) {
+            ExchangeService.command(getApplication(), if (ExchangeRuntime.state.value.quiet) ExchangeService.RESUME else ExchangeService.QUIET)
+            return
+        }
         val desired = if (mutable.value.quiet) "listen" else "quiet"
         pendingMode = desired
         store.pendingMode = desired
@@ -569,6 +628,7 @@ class SonarViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun record(reply: Delivery? = null) {
+        if (ExchangeRuntime.state.value.owned) { notice("请先结束现场交流，再使用手动录音"); return }
         if (
             mutable.value.busy ||
                 mutable.value.linx.busy ||
@@ -1013,6 +1073,7 @@ class SonarViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun recordLinx() {
+        if (ExchangeRuntime.state.value.owned) { notice("请先结束现场交流，再测试私人助手"); return }
         if (
             !foreground ||
                 mutable.value.linx.busy ||

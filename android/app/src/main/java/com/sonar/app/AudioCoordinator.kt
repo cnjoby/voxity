@@ -2,6 +2,7 @@ package com.sonar.app
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.media.AudioDeviceInfo
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioFormat
@@ -125,7 +126,8 @@ class AudioCoordinator(context: Context) {
             }
         }
 
-    suspend fun play(file: File, mode: AudioMode = AudioMode.ORIGINAL) =
+    suspend fun play(file: File, mode: AudioMode = AudioMode.ORIGINAL, ownSpeaker: Boolean = false,
+        mayStart: () -> Boolean = { true }, onStarted: () -> Unit = {}) =
         withContext(Dispatchers.Main.immediate) {
             check(gate.enter(mode)) { "请先结束当前音频" }
             var current: MediaPlayer? = null
@@ -171,7 +173,24 @@ class AudioCoordinator(context: Context) {
                     try {
                         media.setDataSource(file.absolutePath)
                         media.prepare()
+                        if (ownSpeaker) {
+                            if (android.os.Build.VERSION.SDK_INT < 28) {
+                                continuation.resumeWithException(IllegalStateException("自然交流扬声器路由需要 Android 9 或以上"))
+                                return@suspendCancellableCoroutine
+                            }
+                            val speaker = manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                                .firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+                            if (speaker == null || !media.setPreferredDevice(speaker)) {
+                                continuation.resumeWithException(IllegalStateException("本机扬声器不可用"))
+                                return@suspendCancellableCoroutine
+                            }
+                        }
+                        if (!mayStart()) {
+                            continuation.cancel()
+                            return@suspendCancellableCoroutine
+                        }
                         media.start()
+                        onStarted()
                     } catch (e: Exception) {
                         if (continuation.isActive) continuation.resumeWithException(e)
                     }

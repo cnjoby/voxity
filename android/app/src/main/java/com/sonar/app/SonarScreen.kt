@@ -38,12 +38,15 @@ fun SonarScreen(
     vm: SonarViewModel,
     onLocate: () -> Unit,
     onLinxRecord: () -> Unit,
+    onExchangeStart: (Boolean, Boolean) -> Unit = { publish, play -> vm.startExchange(publish, play) },
     onRecord: (Delivery?) -> Unit,
 ) {
     val s by vm.state.collectAsStateWithLifecycle()
+    val exchange by ExchangeRuntime.state.collectAsStateWithLifecycle()
     var mine by remember { mutableStateOf(false) }
     var connection by remember { mutableStateOf(false) }
     var placePicker by remember { mutableStateOf(false) }
+    var exchangeSetup by remember { mutableStateOf(false) }
     val homeScroll = rememberScrollState()
     val mineScroll = rememberScrollState()
     BackHandler(enabled = mine && !connection) { mine = false }
@@ -77,7 +80,7 @@ fun SonarScreen(
                     )
                     TextButton(
                         onClick = { mine = !mine },
-                        enabled = !s.busy && !s.recording && !s.transcribing,
+                        enabled = !exchange.owned && !s.busy && !s.recording && !s.transcribing,
                         modifier = Modifier.testTag("settings"),
                     ) {
                         Text(if (mine) "返回" else "我的")
@@ -86,7 +89,15 @@ fun SonarScreen(
                 if (mine) {
                     LinxPanel(s, vm, onLinxRecord)
                     Preferences(s, vm, onLocate) { connection = true }
+                } else if (exchange.owned) {
+                    ExchangeActivePanel(exchange, vm)
                 } else {
+                    OutlinedButton(
+                        onClick = { exchangeSetup = true },
+                        enabled = s.connected && !s.busy && !s.recording && !s.transcribing,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp).testTag("exchange-setup"),
+                    ) { Text("开始现场交流") }
+                    if (exchange.phase == "unavailable") Info(exchange.message, true)
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             TextButton(
@@ -285,6 +296,35 @@ fun SonarScreen(
                 vm.configure(it)
                 connection = false
             }
+        if (exchangeSetup) {
+            var publish by remember { mutableStateOf(false) }
+            var play by remember { mutableStateOf(false) }
+            AlertDialog(
+                onDismissRequest = { exchangeSetup = false },
+                title = { Text("停车时开启本次交流") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text("交流地点：${s.selectedPlace?.label ?: "请先选择地点"}")
+                        Text("开启后正常说现场情况，无需逐条确认；相关原声在空隙自动播放。私人助手和闲聊不应公开。")
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(publish, { publish = it }, modifier = Modifier.testTag("exchange-auto-publish"))
+                            Text("允许本次自动公开现场原声")
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(play, { play = it }, modifier = Modifier.testTag("exchange-auto-play"))
+                            Text("允许自动收听相关回复")
+                        }
+                        Text("使用真实定位与灵矽识别；退出模拟模式。可随时安静或结束。", fontSize = 13.sp)
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { exchangeSetup = false; onExchangeStart(publish, play) },
+                        enabled = (publish || play) && s.selectedPlace != null,
+                        modifier = Modifier.testTag("exchange-start")) { Text("开启本次交流") }
+                },
+                dismissButton = { TextButton(onClick = { exchangeSetup = false }) { Text("暂不开启") } },
+            )
+        }
     }
 }
 

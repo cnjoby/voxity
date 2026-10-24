@@ -6,6 +6,8 @@
 
 两天黑客松原型：Android 定位并提问，处在目标附近且愿意互助的参与者收到邀请，自愿回答后提问者听到原声。自有业务服务单机部署，语音交互计划接入 Linx；ESP32 由硬件成员实现。
 
+自然现场交流 `v0.1.1`：一次授权后自动分享明确现场原声，在空隙接续相关真人回复，正常路径保持安静。[接口与能力边界](docs/development/natural-exchange.md) · [发布审查](docs/development/review-20261025.md)。
+
 ## 工程入口
 
 | 目录 | 内容 |
@@ -16,7 +18,7 @@
 | [docs/design](docs/design/README.md) | 产品定义、架构与评审 |
 | [开发计划](two-day-development.md) | 三端分工、接口契约与验收 |
 
-服务端已完成本地业务闭环；Android 已通过前台定位、真实高德 POI、附近邀请与双用户录音问答的模拟器闭环。定位为显式注入坐标，双方录音由模拟器 AudioRecord 产生，转写和确认由测试输入。另已完成真机 Linx 接入，用户确认私人语音收到对话回复；完整真人公开问答、ESP32 和公网部署仍待验收，详见[服务端交接](server/HANDOFF.md)及[Android 交接](android/HANDOFF.md)。
+服务端已完成本地业务闭环；Android 已通过前台定位、真实高德 POI、附近邀请与双用户录音问答的模拟器闭环。定位为显式注入坐标，双方录音由模拟器 AudioRecord 产生，转写和确认由测试输入。另已完成真机 Linx 接入，用户确认私人语音收到对话回复；[公网服务](deploy/deployment-20261024.md)已部署并通过 HTTPS、地图/决策、合成问答和重启检查，完整真人公开问答及 ESP32 仍待验收，详见[服务端交接](server/HANDOFF.md)及[Android 交接](android/HANDOFF.md)。
 
 ## 启动服务端
 

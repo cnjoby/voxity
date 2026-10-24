@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     bamboo_base_url: str = "https://api.bamboonode.dev/v1"
     decision_enabled: bool = False
     decision_timeout: float = Field(default=4.5, ge=0.05, le=10)
+    exchange_session_ttl: int = Field(default=3600, ge=60, le=14400)
+    exchange_turn_ttl: int = Field(default=60, ge=5, le=60)
+    exchange_decision_timeout: float = Field(default=20, ge=0.05, le=30)
+    exchange_listen_confidence: float = Field(default=0.65, ge=0.5, le=1)
+    exchange_observation_ttl: int = Field(default=300, ge=10, le=3600)
 
     voice_radius_m: float = Field(default=150, gt=0)
     visit_exit_grace: int = Field(default=120, ge=1)

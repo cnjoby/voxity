@@ -12,7 +12,19 @@ from .attention_worker import AttentionWorker
 from .audio import MAX_AUDIO
 from .config import Settings
 from .errors import Problem
-from .models import Ack, Context, Draft, Empty, Listening, LocationUpdate, VoiceQueue
+from .models import (
+    Ack,
+    Context,
+    Draft,
+    Empty,
+    ExchangeChange,
+    ExchangeContext,
+    ExchangeStart,
+    ExchangeUtterance,
+    Listening,
+    LocationUpdate,
+    VoiceQueue,
+)
 from .service import Service
 
 
@@ -23,7 +35,11 @@ class UploadLimit:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or scope["path"] != "/v1/posts/drafts":
+        limited = scope.get("path") == "/v1/posts/drafts" or (
+            scope.get("path", "").startswith("/v1/exchange/sessions/")
+            and scope.get("path", "").endswith("/utterances")
+        )
+        if scope["type"] != "http" or not limited:
             return await self.app(scope, receive, send)
         data = bytearray()
         while True:
@@ -116,6 +132,47 @@ def create_app(settings: Settings | None = None, clock=time.time):
             db.close()
 
     LOCATION_USER = Depends(location_user)
+
+    @app.post("/v1/exchange/sessions")
+    def start_exchange(data: ExchangeStart, db=DB, uid=USER):
+        return service.start_exchange(db, uid, data)
+
+    @app.get("/v1/exchange/sessions/{sid}")
+    def exchange_session(sid: str, db=DB, uid=USER):
+        return service.exchange_view(db, uid, sid)
+
+    @app.put("/v1/exchange/sessions/{sid}")
+    def exchange_change(sid: str, data: ExchangeChange, db=DB, uid=USER):
+        return service.change_exchange(db, uid, sid, data)
+
+    @app.put("/v1/exchange/sessions/{sid}/context")
+    def exchange_context(sid: str, data: ExchangeContext, db=DB, uid=USER):
+        return service.set_exchange_context(db, uid, sid, data)
+
+    @app.get("/v1/exchange/sessions/{sid}/inbox")
+    async def exchange_inbox(
+        sid: str,
+        exclude: Annotated[list[str] | None, Query(max_length=256)] = None,
+        uid=LOCATION_USER,
+    ):
+        return await service.exchange_inbox(uid, sid, exclude or ())
+
+    @app.get("/v1/exchange/turns/{turn_id}")
+    def exchange_turn(turn_id: str, db=DB, uid=USER):
+        return service.exchange_turn_view(db, uid, turn_id)
+
+    @app.post("/v1/exchange/sessions/{sid}/utterances")
+    async def exchange_utterance(
+        sid: str,
+        audio: Annotated[UploadFile, File()],
+        metadata: Annotated[str, Form(max_length=4096)],
+        uid=LOCATION_USER,
+    ):
+        try:
+            data = ExchangeUtterance.model_validate_json(metadata)
+        except ValidationError as exc:
+            raise Problem(422, "INVALID_METADATA", "语音轮次字段无效") from exc
+        return await service.submit_exchange(uid, sid, data, await audio.read(MAX_AUDIO + 1))
 
     @app.put("/v1/me/location")
     def location(data: LocationUpdate, uid=LOCATION_USER):

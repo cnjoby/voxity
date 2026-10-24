@@ -92,7 +92,7 @@ class VoiceRules:
 
     def thread_root(self, db, user, qid):
         q = self.post(db, qid)
-        if q["kind"] != "question" or q["status"] != "published":
+        if q["kind"] not in ("question", "scene") or q["status"] != "published":
             raise Problem(404, "NOT_FOUND", "对话不存在")
         participants = {q["author_id"]} | {
             r[0]
@@ -101,22 +101,44 @@ class VoiceRules:
                 (qid,),
             )
         }
+        participants.update(
+            r[0]
+            for r in db.execute(
+                "SELECT p.author_id FROM posts p JOIN voice_details v ON v.post_id=p.id "
+                "WHERE p.kind='reply' AND p.status='published' "
+                "AND json_extract(v.metadata_json,'$.root_question_id')=?",
+                (qid,),
+            )
+        )
+        if q["kind"] == "scene" and self.voice_live(db, q) and self.can_read_audio(db, user, q):
+            return q
         if user not in participants:
             raise Problem(404, "NOT_FOUND", "对话不存在")
         return q
 
+    def thread_deadline(self, db, q):
+        if q["kind"] == "scene":
+            meta, _ = self.voice_meta(db, q["id"])
+            return min(
+                epoch((meta or {}).get("valid_until")) or 0,
+                q["published_at"] + self.settings.audio_ttl,
+            )
+        return q["published_at"] + self.settings.audio_ttl
+
+    def thread_open(self, db, q):
+        return self.thread_deadline(db, q) > self.clock() and (
+            self.voice_live(db, q) if q["kind"] == "scene" else q["question_status"] == "answered"
+        )
+
     def check_reply(self, db, user, fields):
         q = self.thread_root(db, user, fields["root_question_id"])
-        if (
-            q["question_status"] != "answered"
-            or q["published_at"] + self.settings.audio_ttl <= self.clock()
-        ):
+        if not self.thread_open(db, q):
             raise Problem(410, "CONVERSATION_CLOSED", "对话已结束")
         parent = self.post(db, fields["reply_to"])
         meta, _ = self.voice_meta(db, parent["id"])
         root = (
             parent["id"]
-            if parent["kind"] == "question"
+            if parent["kind"] in ("question", "scene")
             else parent["reply_to"]
             if parent["kind"] == "answer"
             else (meta or {}).get("root_question_id")
@@ -273,7 +295,7 @@ class VoiceRules:
                 q["id"],
                 p["id"],
                 "audio",
-                q["published_at"] + self.settings.audio_ttl,
+                self.thread_deadline(db, q),
             )
             db.execute(
                 "UPDATE deliveries SET voice_json=? WHERE id=?",
@@ -310,10 +332,7 @@ class VoiceRules:
             return False
         if meta["kind"] == "reply":
             q = self.post(db, meta["root_question_id"])
-            return (
-                q["question_status"] == "answered"
-                and q["published_at"] + self.settings.audio_ttl > self.clock()
-            )
+            return self.thread_open(db, q)
         return (epoch(meta.get("valid_from")) or 0) <= self.clock() and (
             epoch(meta.get("valid_until")) is None or epoch(meta["valid_until"]) > self.clock()
         )
@@ -487,6 +506,21 @@ class VoiceRules:
         prefs = self.listening(db, user)
         if meta and not self.voice_live(db, p):
             return "VOICE_INACTIVE"
+        if data.get("category") == "exchange":
+            try:
+                session = self.require_exchange(db, user, data["exchange_session_id"], play=True)
+            except (Problem, KeyError):
+                return "EXCHANGE_INACTIVE"
+            if p["target_place_id"] != session["place_id"] or not self.physically_near(
+                db, user, p, meta or {}
+            ):
+                return "OUTSIDE_SCOPE"
+            if (
+                data.get("exchange_context_post_id") != session["context_post_id"]
+                and p["id"] != session["context_post_id"]
+            ):
+                return "EXCHANGE_CONTEXT_CHANGED"
+            return None
         if (
             p["kind"] in ("answer", "reply")
             and not prefs["replies_enabled"]
@@ -523,7 +557,7 @@ class VoiceRules:
             payload["valid_until"] = stamp(p["published_at"] + self.settings.audio_ttl)
         elif p["kind"] == "reply":
             payload["valid_until"] = stamp(
-                self.post(db, meta["root_question_id"])["published_at"] + self.settings.audio_ttl
+                self.thread_deadline(db, self.post(db, meta["root_question_id"]))
             )
         elif p["kind"] == "question" and p["question_status"] == "answered":
             payload["valid_until"] = stamp(p["published_at"] + self.settings.audio_ttl)
@@ -617,16 +651,16 @@ class VoiceRules:
                 else self.voice_meta(db, pid)[0]["root_question_id"]
             )
             root = self.thread_root(db, user, qid)
-            if (
-                root["question_status"] != "answered"
-                or (p["published_at"] if p["kind"] == "answer" else root["published_at"])
-                + self.settings.audio_ttl
-                <= self.clock()
+            if not self.thread_open(db, root) or (
+                p["kind"] == "answer"
+                and p["published_at"] + self.settings.audio_ttl <= self.clock()
             ):
                 raise Problem(410, "CONVERSATION_CLOSED", "对话已结束")
             expiry = (
-                p["published_at"] if p["kind"] == "answer" else root["published_at"]
-            ) + self.settings.audio_ttl
+                p["published_at"] + self.settings.audio_ttl
+                if p["kind"] == "answer"
+                else self.thread_deadline(db, root)
+            )
         else:
             qid = pid
             expiry = p["expires_at"] or self.clock() + self.settings.audio_ttl
@@ -672,14 +706,15 @@ class VoiceRules:
         return {
             "question_id": qid,
             "visibility": "public",
-            "can_reply": q["question_status"] == "answered"
-            and q["published_at"] + self.settings.audio_ttl > self.clock(),
+            "can_reply": self.thread_open(db, q),
+            "root_kind": q["kind"],
             "items": [
                 {
                     **self.voice_payload(db, p),
                     "operator_reply_channel": self.channel_reply_option(db, user, qid),
                 }
                 for p in rows
+                if self.can_read_audio(db, user, p)
             ],
             **self.now(),
         }

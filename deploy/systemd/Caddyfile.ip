@@ -1,0 +1,19 @@
+# Public IP certificate; Caddy >=2.11, ACME shortlived profile.
+# Keep ports 80/443 reachable for issuance and automatic renewal.
+{
+	# IP clients omit SNI; this also handles the host's private/public NAT.
+	default_sni {$SONAR_PUBLIC_IP}
+}
+
+{$SONAR_PUBLIC_IP} {
+	tls {
+		issuer acme {
+			dir https://acme-v02.api.letsencrypt.org/directory
+			profile shortlived
+		}
+	}
+	header -Server
+	reverse_proxy 127.0.0.1:8765 {
+		flush_interval -1
+	}
+}

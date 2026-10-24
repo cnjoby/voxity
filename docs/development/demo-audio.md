@@ -4,7 +4,7 @@
 
 ## 使用
 
-首页点「模拟位置」，选择中环路金科路口、人工智能岛 19 号楼附近或模力社区附近。每处有 12 条中文音频：公告、路况、闲聊各 4 条，共 36 条、4 种合成音色。默认各展示一条，支持分类、展开、逐条试听和停止。音频随 APK 打包，无需网络、账号、定位权限或灵矽即可试听；仅主动点击播放，不自动连播、不公开、不产生交付回执。
+首页点「模拟位置」，选择中环路金科路口、人工智能岛 19 号楼附近或模力社区附近。每处有 12 条中文音频：公告、路况、闲聊各 4 条，共 36 条、3 种口语音色。默认各展示一条，支持分类、展开、逐条试听和停止。音频随 APK 打包，无需网络、账号、定位权限或灵矽即可试听；仅主动点击播放，不自动连播、不公开、不产生交付回执。
 
 首页点「手机真实位置」可退出测试模式，申请前台定位权限，使用 Android 原生 GPS / 网络定位。连接 Sonar 服务后由高德解析附近地点；离线且没有设备凭证时仍能尝试取得手机定位，但不能解析目标地点。拒绝权限、定位关闭或超时仍能回到模拟体验或手选询问目标。系统模拟定位持续标明测试来源，不能作为真实 GPS 验收。
 
@@ -12,9 +12,9 @@
 
 ## 素材与重建
 
-素材目录：`android/app/src/main/assets/demo/`。`manifest.json` 包含逐条文字、类别、音色、地点、秒数、SHA-256。音频是完整 16 kHz / 单声道 / 16-bit PCM WAV，每条约 4–5 秒，最长不超过服务契约的 8 秒；不是静音文件。
+素材目录：`android/app/src/main/assets/demo/`。`manifest.json` 包含逐条文字、类别、音色、地点、秒数、SHA-256。音频是完整 16 kHz / 单声道 / 16-bit PCM WAV，每条最长不超过服务契约的 8 秒；不是静音文件。
 
-每条音频开头均说「模拟公告」「模拟路况」或「测试闲聊」，文字和页面也持续显示测试标识。公告、活动、停车及路况均为虚构测试情境，不能据此出行或判断现场。地点锚点为高德在 2026-10-24 返回的 GCJ-02 数据：
+当前口语版按用户反馈去掉逐条开头的类别口播，页面、清单与来源说明持续标记合成测试内容。公告、活动、停车及路况均为虚构测试情境，不能据此出行或判断现场。地点锚点为高德在 2026-10-24 返回的 GCJ-02 数据：
 
 | 地点 | 经度，纬度 | 精度边界 |
 | --- | --- | --- |
@@ -24,13 +24,26 @@
 
 园区地址可参考[浦东新区官方园区介绍](https://dangjian.pudong.gov.cn/pddj/dsxxjy/ztzg/20240529/4b7cafc52cf5c0fe455b6a741edcad0b.html)；具体测试锚点取自上述高德接口查询。
 
-macOS 已安装相应中文系统音色、ffmpeg / ffprobe 时，从仓库根目录重建：
+当前使用 Qwen3-TTS 1.7B CustomVoice 的本地 MLX 版本，模型版本固定在生成脚本中。公告使用 Serena 随口提醒，路况使用 Dylan 随口描述，闲聊使用 Vivian 朋友聊天；不克隆真人声音。脚本、音色指令和随机种子随清单保存。依赖与模型仅用于电脑端制作素材，手机仍播放打包的 WAV，不运行模型。
+
+首次准备生成环境（Apple Silicon，需 ffmpeg）：
 
 ```sh
-python3 scripts/generate_demo_audio.py
+uv venv output/natural-tts/.venv --python 3.12
+uv pip install --python output/natural-tts/.venv/bin/python -r scripts/requirements-natural-tts.txt
 ```
 
-使用本机系统语音合成，没有调用付费云服务；重建不裁切语音，超长时调整速度并检查完整 WAV。重建后重新构建 APK。
+生成和替换：
+
+```sh
+# 先生成三个类别的样音，再生成完整批次；中断后按清单继续。
+output/natural-tts/.venv/bin/python scripts/generate_natural_demo_audio.py --preview
+output/natural-tts/.venv/bin/python scripts/generate_natural_demo_audio.py
+# 全部 36 条验证完成后才替换 APK 素材，并保留 v1 本地备份。
+output/natural-tts/.venv/bin/python scripts/generate_natural_demo_audio.py --apply
+```
+
+保留自然语速与停顿，不裁切或变速；超过 8 秒会重新生成，仍超长则需精简措辞。旧 macOS `say` 生成脚本仅保留作历史参考，不能覆盖当前自然语音素材。重建后重新构建 APK。
 
 ## 服务端联调素材
 
@@ -41,12 +54,12 @@ cd server
 uv run python -m app.demo_audio
 ```
 
-先校验全部文件，再以独立测试作者和明确标记的测试公告频道导入 36 条，注册三个 `demo:` 地点。不会更换 alice/bob 凭证、用户配置或旧任务；重复执行不重复发布、不续期、不复活撤回内容。公告最长 24 小时（尊重服务器更短的上限），过期后不再出现在服务端有效公告中；离线测试素材仍可试听。所有导入素材为「适用条件未知」，只供主动查询，不自动推荐或播报。没有提供真实运营权限，也没有启用 `SONAR_ALLOW_MOCK_LOCATION`。
+先校验全部文件，再以独立测试作者和明确标记的测试公告频道导入 36 条，注册三个 `demo:` 地点。不会更换 alice/bob 凭证、用户配置或旧任务；同一素材版本重复执行不重复发布、不续期、不复活撤回内容。新版本为独立不可变音频，在同一事务中撤回本生成器对应的旧版本测试记录，保留旧文件与历史，不改其他人的声音或任务。公告最长 24 小时（尊重服务器更短的上限），过期后不再出现在服务端有效公告中；离线测试素材仍可试听。所有导入素材为「适用条件未知」，只供主动查询，不自动推荐或播报。没有提供真实运营权限，也没有启用 `SONAR_ALLOW_MOCK_LOCATION`。
 
 ## 本次验证
 
 - Android Debug APK、测试 APK、单元测试与 Lint 通过。
-- 服务端 95 项测试通过；新增检查 36 条音频完整性、非静音、时长、类别分布、幂等导入、用户设置不变及公告到期。
+- 首轮服务端 95 项测试通过；新增检查 36 条音频完整性、非静音、时长、类别分布、幂等导入、用户设置不变及公告到期。
 - API 36 模拟器：三处地点切换、分类、三处真实 WAV 的 MediaPlayer 完成、快速换播与停止、测试位置持久保存、退出测试进入 Android 定位路径通过。页面截图已人工查看。
 - 模拟器使用显式注入坐标，只证明 Android 定位调用和来源标记；不证明实体手机 GPS 或实际扬声器。
 - 首轮 vivo 无线调试连接不可达，因此当时未安装 APK；后续真机复测见下节。此前其他轮次的真机结果不替代本轮结果。
@@ -67,3 +80,21 @@ uv run python -m app.demo_audio
 - 未录音、未发布、未丢弃用户草稿；应用留在真实定位模式。上面是程序与音频路由检查，实际听感仍等待用户确认。
 
 本地证据：`android/build/reports/demo-phone/acceptance-final.txt`、`acceptance-final.json`、`final-environment.json`、`real-location.png`；首轮失败、草稿比较失败分别保留在 `first-attempt.*`、`acceptance-retest.txt` / `retest.json`。这些报告与精确位置数据不提交源码。
+
+## 口语自然 TTS（2026-10-24）
+
+用户反馈原 macOS 系统合成音色过于机械，未通过听感验收。改用 Qwen3-TTS 后，用户要求进一步「更随意、更像聊天」；随后试听了去掉类别口播、使用日常短句与微信语音语气的三条新样音，明确确认「这版可以，按这个方向」。这一确认适用于当前口语版风格，不等于逐条人工核对 36 条的每一个发音。
+
+当前清单为 v3，包含完整模型来源、版本、音色、风格指令、种子和文件摘要；v1 是系统音色，v2 是中间样音方向，均保留在本地历史中。来源：[Qwen3-TTS 官方项目](https://github.com/QwenLM/Qwen3-TTS)、[MLX 使用文档](https://github.com/Blaizzy/mlx-audio/blob/main/docs/models/tts/qwen3-tts.md)。
+
+
+口语版 v3 完成后：
+
+- 36 条 WAV 均为 16 kHz 单声道 16-bit PCM，自然语速，每条约 2.5–5.8 秒；无变速或截断。所有文件通过格式、时长、非静音和摘要检查。
+- 服务端 96 项检查通过；版本升级检查验证旧测试记录撤回、旧音频文件保留、每处仅展示新版本的 12 条。真实 HTTP 目录与下载的 36 条音频均逐条核对新清单 SHA-256。
+- vivo V2405A 已覆盖安装 v3，设备 APK 摘要与最新交付包一致。23:04 真机复测一项通过：三个类别的新音频均由应用既有 MediaPlayer 自然完成，并观测到内置扬声器设备类型 2；真实定位样本当时约 0 秒、精度 30 米，地点解析正常。
+- 22 项 Android 单元检查、Lint、构建通过；模拟器分类、换播、停止、位置切换检查通过，已查看新页面中的测试标识与口语文稿。
+- 原模拟任务及灵矽身份文件保留；连接配置文件有重新保存，未将文件摘要变化误作凭证丢失。真机测试内对设备凭证与灵矽凭证作了相等性检查，没有公开内容或丢弃用户草稿。
+- 本次导入前的快照命令路径错误，未生成该快照；补存的快照为 `server/data/sonar-after-natural-tts-20261024.sqlite3`。旧版本 36 个音频文件与 v1 清单的摘要逐一相同，旧记录完整保留。
+
+最新证据在忽略目录 `android/build/reports/natural-tts-phone/`，包括 `acceptance.txt/json`、`environment.json`、`emulator-ui.txt`、`preview.png`。旧机械版备份位于 `output/natural-tts/legacy-system-voices/`；最新音频包为 `output/zhangjiang-natural-tts-20261024.zip`，最新可安装包仍为 `output/sonar-zhangjiang-demo-debug.apk`。
