@@ -18,19 +18,24 @@ class ProtectedMCP:
         self.service = service
         self.apps = {}
 
-    def user_app(self, uid):
-        if uid in self.apps:
+    def user_app(self, uid, streamable=False):
+        if not streamable and uid in self.apps:
             return self.apps[uid]
         # Host checking is done by the HTTPS proxy allowlist; bearer+binding are mandatory here.
         mcp = FastMCP(
             "Sonar",
             sse_path="/mcp",
             message_path="/mcp/message/",
+            streamable_http_path="/mcp/http",
+            stateless_http=True,
+            json_response=True,
             transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
         )
 
         def invoke(method, **kwargs):
             try:
+                if uid is None:
+                    raise Problem(401, "MCP_IDENTITY_MISSING", "缺少平台身份，仅可发现工具")
                 with self.service.scope() as db:
                     result = method(db, uid, **kwargs)
                 return CallToolResult(
@@ -48,6 +53,18 @@ class ProtectedMCP:
         @mcp.tool()
         def probe():
             """只读验证 Sonar 可信用户映射，不公开凭证。"""
+            if uid is None:
+                return CallToolResult(
+                    content=[
+                        TextContent(
+                            type="text",
+                            text=json.dumps(
+                                {"code": "MCP_IDENTITY_MISSING", "message": "缺少平台身份"}
+                            ),
+                        )
+                    ],
+                    isError=True,
+                )
             result = {"status": "ok", "user_id": uid}
             return CallToolResult(
                 content=[TextContent(type="text", text=json.dumps(result))],
@@ -85,6 +102,10 @@ class ProtectedMCP:
                 post_id=post_id,
             )
 
+        if streamable:
+            # A fresh stateless transport per HTTP request binds every call to that request's
+            # verified identity. Its lifespan never shares a task group with another request.
+            return mcp.streamable_http_app()
         self.apps[uid] = mcp.sse_app()
         return self.apps[uid]
 
@@ -93,7 +114,7 @@ class ProtectedMCP:
             return
         settings = self.service.settings
         try:
-            if scope["path"] not in ("/mcp", "/mcp/message", "/mcp/message/"):
+            if scope["path"] not in ("/mcp", "/mcp/message", "/mcp/message/", "/mcp/http"):
                 raise Problem(404, "NOT_FOUND", "接口不存在")
             if not settings.mcp_enabled or len(settings.mcp_secret) < 32:
                 raise Problem(503, "MCP_DISABLED", "MCP 尚未配置可信凭证")
@@ -103,19 +124,31 @@ class ProtectedMCP:
                 raise Problem(401, "UNAUTHORIZED", "MCP 凭证无效")
             device = request.headers.get("x-linx-device-id", "")
             agent = request.headers.get("x-linx-agent-id", "")
-            if not device or not agent or not request.headers.get("x-linx-session-id"):
+            session = request.headers.get("x-linx-session-id", "")
+            if not any((device, agent, session)):
+                # Console discovery has no active device. This transport exposes schemas only;
+                # every tool call fails closed and cannot target a user's transport session.
+                uid = None
+            elif not all((device, agent, session)):
                 raise Problem(401, "MCP_IDENTITY_MISSING", "缺少平台身份")
-            with self.service.scope() as db:
-                row = db.execute(
-                    "SELECT id FROM users WHERE device_id=? AND agent_id=? AND agent_id!=''",
-                    (device, agent),
-                ).fetchone()
-            if not row:
-                raise Problem(403, "MCP_BINDING_INVALID", "平台绑定不匹配")
+            else:
+                with self.service.scope() as db:
+                    row = db.execute(
+                        "SELECT id FROM users WHERE device_id=? AND agent_id=? AND agent_id!=''",
+                        (device, agent),
+                    ).fetchone()
+                if not row:
+                    raise Problem(403, "MCP_BINDING_INVALID", "平台绑定不匹配")
+                uid = row["id"]
             # Each user has a distinct SDK session store. A valid Bob POST cannot target Alice SSE.
-            app = self.user_app(row["id"])
+            streamable = scope["path"] == "/mcp/http"
+            app = self.user_app(uid, streamable=streamable)
             if scope["path"] == "/mcp/message":
                 scope = {**scope, "path": "/mcp/message/", "raw_path": b"/mcp/message/"}
-            await app(scope, receive, send)
+            if streamable:
+                async with app.router.lifespan_context(app):
+                    await app(scope, receive, send)
+            else:
+                await app(scope, receive, send)
         except Problem as exc:
             await JSONResponse(exc.body(), status_code=exc.status)(scope, receive, send)

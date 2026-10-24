@@ -1,0 +1,27 @@
+[Unit]
+Description=Voxity Sonar API (single process)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=voxity
+Group=voxity
+WorkingDirectory=/opt/voxity/current
+EnvironmentFile=/etc/voxity/server.env
+Environment=SONAR_DATA_DIR=/var/lib/voxity
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/voxity/current/.venv/bin/python -m uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8765 --workers 1 --no-access-log --proxy-headers --forwarded-allow-ips=127.0.0.1
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/voxity
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

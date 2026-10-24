@@ -1,6 +1,21 @@
 # 单机部署
 
-本机环境未安装 Docker，以下配置尚未做容器构建和公网部署验证。应用已有本机运行证据，见 [服务端交接](../server/HANDOFF.md)。
+2026-10-24 已部署到 Ubuntu 24.04：业务地址 `https://122.195.131.106`，
+[健康检查](https://122.195.131.106/healthz)、[接口文档](https://122.195.131.106/docs)。
+本次采用 Python 3.12 虚拟环境、systemd 单进程服务和 Caddy 公网 IP 证书；
+高德、Bamboo、公网 HTTPS 三轮合成问答与重启恢复已验证。
+运行路径、配置迁移、验证边界和运维命令见 [实际部署记录](deployment-20261024.md)。
+
+## 当前 systemd 部署
+
+模板位于 [voxity.service](systemd/voxity.service) 和 [Caddyfile.ip](systemd/Caddyfile.ip)。
+设备使用上述业务地址和原有设备 Token；高德与 Bamboo Key 只保存在服务器。
+手机配置页修改业务地址时需保留现有 Linx 配置；不要用覆盖全部配置的 bootstrap 脚本迁移已绑定手机。
+
+服务器访问 Docker Hub 超时，因而本次没有使用容器。原 Compose 方案保留如下，
+容器构建仍未验证；原生部署成功不代表容器方案通过。
+
+## Docker Compose 备选方案
 
 需要真实服务器、Docker Compose、域名与80/443端口可达。DNS 指向该服务器后，由 Caddy 获取证书；SONAR_DOMAIN 填真实主机名，不能使用示例地址宣称上线。
 

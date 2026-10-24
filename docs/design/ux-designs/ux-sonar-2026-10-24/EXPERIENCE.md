@@ -2,9 +2,9 @@
 name: 声呐 Sonar 自然交流代理
 description: App 与 ESP32 在一次授权的车用会话内，自动发布现场原声并接续相关回复，系统平时保持安静。
 status: final
-implementation_status: pending
+implementation_status: partial_android_server
 review_status: skipped_by_user
-updated: 2026-10-24
+updated: 2026-10-25
 sources:
   - .decision-log.md
   - ../../architecture.md
@@ -20,11 +20,11 @@ sources:
 
 用户已明确纠正前版：不再以“每条读回、询问、确认”和“先提示、等播放指令”为默认路径。原每条确认方案仅保留为用户选择的审阅模式或少量必要澄清。本文件覆盖前版对应规则，现有 App/固件实现状态不因此改变。
 
-停车准备时一次开启本次“现场交流”：明确允许自动发布哪些现场内容、公开到哪里，以及是否自动收听相关回复。发布和收听分别授权，随时暂停/结束。默认不把私人助手或车内闲聊视为已授权公共内容。这里的会话授权是新产品设计，现有 profile/context/listening 尚无完整字段，不能仅凭 assist_enabled=true 或 mode=listen 推定已经授权自动发布。
+停车准备时一次开启本次“现场交流”：明确允许自动发布哪些现场内容、公开到哪里，以及是否自动收听相关回复。发布和收听分别授权，随时暂停/结束。默认不把私人助手或车内闲聊视为已授权公共内容。会话授权由独立 exchange session 保存，发布和播放分别授权；不能仅凭 assist_enabled=true 或 mode=listen 推定已经授权自动发布。
 
 [DESIGN.md](DESIGN.md)规定视觉镜像。手机屏幕/ESP32 指示不承担必需确认；同一会话内不反复要求唤醒、说“我想提问”、听控制提示或念口令。首次授权、配网、权限、模型/拾音自检在停车完成。无可靠车况时不从 GPS 低速推断已停车。
 
-当前只交付设计，待命语音采集、交互意图、自动发布策略、连续相关原声播放及车内声学都待实现和实测。零触屏不等于道路安全认证。
+2026-10-25 已提供 Android 有界语音采集、自然发言提交、独立会话授权、相关原声调度及服务端复核实现，详见[实现与验收边界](../../../development/natural-exchange.md)。ESP32 固件、真人完整语音闭环和车内声学仍待实现/实测；本轮软件测试不等于道路安全认证。
 
 ## Information Architecture
 

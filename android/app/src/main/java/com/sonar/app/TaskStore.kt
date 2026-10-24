@@ -12,10 +12,14 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import org.json.JSONObject
 
+const val SONAR_BASE_URL = "https://122.195.131.106"
+private const val SERVER_ADDRESS_MIGRATED = "server_address_migrated_v1"
+
 data class DeviceConfig(
-    val baseUrl: String = "http://127.0.0.1:8765",
+    val baseUrl: String = SONAR_BASE_URL,
     val token: String = "",
     val mock: Boolean = false,
     val debugTranscript: Boolean = false,
@@ -27,6 +31,22 @@ data class DeviceConfig(
     val linxOtaUrl: String = LINX_OTA,
     val testPlaceId: String = "",
 ) {
+    /** Only the old local deployment address is eligible for the one-time upgrade. */
+    internal fun migrateLocalServerAddress(): DeviceConfig {
+        if (mock) return this
+        val url = baseUrl.toHttpUrlOrNull() ?: return this
+        return if (
+            url.scheme == "http" &&
+                url.host in setOf("127.0.0.1", "localhost", "10.0.2.2") &&
+                url.port == 8765 &&
+                url.encodedPath == "/" &&
+                url.query == null &&
+                url.fragment == null &&
+                url.username.isEmpty() &&
+                url.password.isEmpty()
+        ) copy(baseUrl = SONAR_BASE_URL) else this
+    }
+
     fun toJson() =
         json(
             "base_url" to baseUrl,
@@ -52,7 +72,7 @@ data class DeviceConfig(
     companion object {
         fun parse(j: JSONObject) =
             DeviceConfig(
-                j.text("base_url", "http://127.0.0.1:8765"),
+                j.text("base_url", SONAR_BASE_URL),
                 j.text("token"),
                 j.optBoolean("mock"),
                 j.optBoolean("debug_transcript"),
@@ -130,6 +150,7 @@ class ConfigStore(private val context: Context) {
                 .edit()
                 .putString("iv", Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
                 .putString("sealed", Base64.encodeToString(data, Base64.NO_WRAP))
+                .putBoolean(SERVER_ADDRESS_MIGRATED, true)
                 .commit()
         )
     }
@@ -145,7 +166,7 @@ class ConfigStore(private val context: Context) {
             }
         }
         val sealed = prefs.getString("sealed", null) ?: return normalize(DeviceConfig())
-        return runCatching {
+        val config = runCatching {
                 val cipher =
                     Cipher.getInstance("AES/GCM/NoPadding").apply {
                         init(
@@ -164,11 +185,23 @@ class ConfigStore(private val context: Context) {
                 )
             }
             .getOrElse { throw IllegalStateException("无法解锁本机配置，请清除应用数据后重新配置") }
+        if (!prefs.getBoolean(SERVER_ADDRESS_MIGRATED, false)) {
+            val migrated = config.migrateLocalServerAddress()
+            // Persist the encrypted config and migration marker together. Explicit later edits,
+            // including local debug bootstrap configurations, keep their selected address.
+            save(migrated)
+            return migrated
+        }
+        return config
     }
 }
 
 class TaskStore(context: Context, scope: String) {
     private val prefs = context.getSharedPreferences("tasks-$scope", Context.MODE_PRIVATE)
+    var automaticAudioSuspended: Boolean
+        get() = prefs.getBoolean("natural-exchange-selected", false)
+        set(value) { check(prefs.edit().putBoolean("natural-exchange-selected", value).commit()) }
+
     var draft: LocalDraft?
         get() =
             prefs.getString("draft", null)?.let {
@@ -213,6 +246,11 @@ class TaskStore(context: Context, scope: String) {
                 .commit()
         )
     }
+
+    fun excludedDeliveryIds(): List<String> = prefs.all.entries
+        .filter { (key, value) -> value == true && (key.startsWith("defer:") || key.startsWith("attempt:")) }
+        .sortedBy { if (it.key.startsWith("defer:")) 0 else 1 }
+        .map { it.key.substringAfter(":").substringBefore(":") }.distinct().take(256)
 
     fun deferred(key: String) = prefs.getBoolean("defer:$key", false)
 

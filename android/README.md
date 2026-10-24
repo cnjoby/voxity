@@ -1,5 +1,7 @@
 # 声呐 Sonar Android
 
+2026-10-25 发布审查：[自然交流 v0.1.1 审查与回归](../docs/development/review-20261025.md)。真实手机与车内验收边界仍保留。
+
 Kotlin + Compose + OkHttp 客户端，默认连接真实 Sonar API；显式模拟模式和手动调试转写仅在 Debug 开放。ESP32 工程不在本目录，仍由硬件成员实现。
 
 ## 构建与安装
@@ -18,7 +20,12 @@ adb -s YOUR_SERIAL install -r app/build/outputs/apk/debug/app-debug.apk
 
 先按 [服务端说明](../server/README.md)启动现有服务，不需要修改服务端契约。
 
-在手机“连接设置”填写服务地址和 alice 的设备凭证；凭证运行时进入 Android Keystore 加密的私有配置，不进入源码、资源或 APK。不要使用 bob 的凭证冒充提问者。Linx 设备凭证与 Sonar 设备凭证分开。
+App 默认服务地址为 `https://122.195.131.106`。覆盖安装后首次启动会一次性把旧配置中的
+`http://127.0.0.1:8765`、`http://localhost:8765`、`http://10.0.2.2:8765`（可带末尾 `/`）
+迁到该地址，并加密保存；Token、灵矽绑定和其他配置保留。自定义服务器、模拟模式及显式 Debug bootstrap
+地址保留，迁移后手动改回本地调试地址也不会被再次覆盖。旧任务缓存仍按原服务器隔离保存，不自动向新服务重提交草稿或回执。
+
+在手机“连接设置”填写 alice 的设备凭证；凭证运行时进入 Android Keystore 加密的私有配置，不进入源码、资源或 APK。不要使用 bob 的凭证冒充提问者。Linx 设备凭证与 Sonar 设备凭证分开。
 
 本机调试可通过 USB/模拟器反向端口：
 
@@ -29,7 +36,7 @@ python3 tools/configure_device.py --serial YOUR_SERIAL --debug-transcript
 
 脚本仅为 Debug 应用，从环境 SONAR_ALICE_TOKEN 或同仓库 server/.env 读取 alice Token，以 stdin 写入应用私有的一次性 bootstrap；应用启动后加密保存并删除 bootstrap。凭证不出现在命令行、输出和 APK 中。脚本会停止并重启该 Debug 应用，不清除业务任务。默认地址 http://127.0.0.1:8765；模拟器也可用10.0.2.2。手机无法用127.0.0.1直接访问电脑，必须完成 reverse。
 
-Debug HTTP只允许上述本机域名；其他地址及 Release 均要求 HTTPS。需要远程访问时填写实际部署的 HTTPS 地址。本轮没有公网地址。
+Debug HTTP只允许上述本机域名；其他地址及 Release 均要求 HTTPS。公网部署与服务端验证见[部署记录](../deploy/deployment-20261024.md)。
 
 `--debug-transcript` 明确启用手动转写，仅用于先验证业务链路；页面持续显示标识。去掉该参数则要求真实 Linx 配置和识别候选，不能在缺少转写时发布。
 
@@ -85,3 +92,5 @@ python3 tools/run_live_flow.py --serial YOUR_SERIAL --synthetic-peer
 ## 张江测试音频与位置切换
 
 首页「模拟位置」可直接选择三个张江测试地点，每处 12 条公告、路况与闲聊，随 APK 离线试听；「手机真实位置」退出测试并请求 GPS / 网络定位。模拟来源始终可见，不获得真实在场资格。素材、可选服务端导入和验收边界见[测试音频说明](../docs/development/demo-audio.md)。
+
+测试素材现为用户确认的口语自然 TTS：三种表达分别用于提醒、路况和朋友闲聊。36 条均为正常语速的本地 WAV；页面保留合成测试标识。制作环境与版本升级见[测试音频说明](../docs/development/demo-audio.md)。

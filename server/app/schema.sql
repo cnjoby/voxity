@@ -72,3 +72,27 @@ CREATE TABLE IF NOT EXISTS voice_queue_requests (
  post_id TEXT NOT NULL REFERENCES posts(id), delivery_id TEXT NOT NULL,
  request_id TEXT NOT NULL, PRIMARY KEY(user_id,command_id)
 );
+
+CREATE TABLE IF NOT EXISTS exchange_sessions (
+ id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
+ client_request_id TEXT NOT NULL, fingerprint TEXT NOT NULL,
+ place_id TEXT NOT NULL REFERENCES places(id),
+ auto_publish INTEGER NOT NULL, auto_play INTEGER NOT NULL,
+ state TEXT NOT NULL DEFAULT 'active', revision INTEGER NOT NULL DEFAULT 1,
+ created_at REAL NOT NULL, expires_at REAL NOT NULL,
+ context_post_id TEXT REFERENCES posts(id),
+ UNIQUE(user_id,client_request_id)
+);
+CREATE TABLE IF NOT EXISTS exchange_turns (
+ id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES exchange_sessions(id),
+ user_id TEXT NOT NULL REFERENCES users(id), client_request_id TEXT NOT NULL,
+ fingerprint TEXT NOT NULL, session_revision INTEGER NOT NULL,
+ profile_revision INTEGER NOT NULL, created_at REAL NOT NULL,
+ status TEXT NOT NULL, result_json TEXT, post_id TEXT REFERENCES posts(id),
+ UNIQUE(user_id,client_request_id)
+);
+CREATE TABLE IF NOT EXISTS exchange_candidates (
+ session_id TEXT NOT NULL REFERENCES exchange_sessions(id), post_id TEXT NOT NULL REFERENCES posts(id),
+ profile_revision INTEGER NOT NULL, state TEXT NOT NULL, created_at REAL NOT NULL,
+ PRIMARY KEY(session_id,post_id,profile_revision)
+);

@@ -39,6 +39,14 @@ interface SonarApi {
 
     suspend fun conversation(qid: String): JSONObject = json("items" to org.json.JSONArray())
 
+    suspend fun startExchange(data: JSONObject): JSONObject = error("此服务不支持自然交流")
+    suspend fun exchangeSession(id: String): JSONObject = error("此服务不支持自然交流")
+    suspend fun changeExchange(id: String, revision: Int, state: String): JSONObject = error("此服务不支持自然交流")
+    suspend fun exchangeContext(id: String, revision: Int, postId: String): JSONObject = error("此服务不支持自然交流")
+    suspend fun exchangeInbox(id: String): JSONObject = error("此服务不支持自然交流")
+    suspend fun exchangeInbox(id: String, excluded: List<String>): JSONObject = exchangeInbox(id)
+    suspend fun exchangeUpload(id: String, file: File, metadata: JSONObject): JSONObject = error("此服务不支持自然交流")
+
     suspend fun upload(draft: LocalDraft): JSONObject
 
     suspend fun confirm(postId: String): JSONObject
@@ -117,8 +125,13 @@ class HttpSonarApi(
             executeJson(builder.build())
         }
 
+    private val exchangeClient = client.newBuilder().callTimeout(40, TimeUnit.SECONDS)
+        .readTimeout(35, TimeUnit.SECONDS).build()
+
     private fun executeJson(request: Request): JSONObject =
-        client.newCall(request).execute().use { response ->
+        (if (request.url.encodedPath.startsWith("/v1/exchange/") &&
+            (request.url.encodedPath.endsWith("/utterances") || request.url.encodedPath.endsWith("/inbox")))
+            exchangeClient else client).newCall(request).execute().use { response ->
             val body = response.body?.string().orEmpty()
             val parsed = runCatching { JSONObject(body) }.getOrNull()
             if (!response.isSuccessful) {
@@ -160,6 +173,27 @@ class HttpSonarApi(
         call("/v1/voices/$postId/withdraw", JSONObject())
 
     override suspend fun conversation(qid: String) = call("/v1/conversations/$qid")
+
+    override suspend fun startExchange(data: JSONObject) = call("/v1/exchange/sessions", data)
+    override suspend fun exchangeSession(id: String) = call("/v1/exchange/sessions/$id")
+    override suspend fun changeExchange(id: String, revision: Int, state: String) =
+        call("/v1/exchange/sessions/$id", json("expected_session_revision" to revision, "state" to state), "PUT")
+    override suspend fun exchangeContext(id: String, revision: Int, postId: String) =
+        call("/v1/exchange/sessions/$id/context", json("expected_session_revision" to revision, "post_id" to postId), "PUT")
+    override suspend fun exchangeInbox(id: String) = exchangeInbox(id, emptyList())
+    override suspend fun exchangeInbox(id: String, excluded: List<String>) =
+        call("/v1/exchange/sessions/$id/inbox" + excluded.take(256).joinToString("&", prefix = if (excluded.isEmpty()) "" else "?") {
+            "exclude=" + java.net.URLEncoder.encode(it, "UTF-8")
+        })
+    override suspend fun exchangeUpload(id: String, file: File, metadata: JSONObject): JSONObject =
+        withContext(Dispatchers.IO) {
+            require(file.length() in 46..(300 * 1024)) { "录音大小无效" }
+            val body = MultipartBody.Builder().setType(MultipartBody.FORM)
+                .addFormDataPart("metadata", metadata.toString())
+                .addFormDataPart("audio", "voice.wav", file.readBytes().toRequestBody("audio/wav".toMediaType()))
+                .build()
+            executeJson(request("/v1/exchange/sessions/$id/utterances").post(body).build())
+        }
 
     override suspend fun upload(draft: LocalDraft): JSONObject =
         withContext(Dispatchers.IO) {

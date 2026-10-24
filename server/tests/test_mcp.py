@@ -8,6 +8,7 @@ import uvicorn
 from conftest import answer, auth, invitation, publish, set_context
 from mcp import ClientSession
 from mcp.client.sse import sse_client
+from mcp.client.streamable_http import streamable_http_client
 
 from app.errors import Problem
 
@@ -106,6 +107,30 @@ def test_official_sdk_over_real_sse_and_session_isolation(env):
         }
 
         async def run():
+            discovery = {"Authorization": headers["Authorization"]}
+            async with sse_client(base + "/mcp", headers=discovery) as streams:
+                async with ClientSession(*streams) as session:
+                    await session.initialize()
+                    assert {t.name for t in (await session.list_tools()).tools} == {
+                        "probe",
+                        "get_feed",
+                        "set_focus",
+                        "queue_voice",
+                    }
+                    for name, args in [
+                        ("probe", {}),
+                        ("get_feed", {}),
+                        ("set_focus", {"expected_revision": 1, "mode": "quiet"}),
+                        (
+                            "queue_voice",
+                            {"request_id": "none", "profile_revision": 1, "post_id": "none"},
+                        ),
+                    ]:
+                        result = await session.call_tool(name, args)
+                        assert result.isError
+                        assert "MCP_IDENTITY_MISSING" in result.content[0].text
+            with service.scope() as db:
+                assert service.profile(db, "alice")["mode"] == "listen"
             async with sse_client(base + "/mcp", headers=headers) as streams:
                 async with ClientSession(*streams) as session:
                     await session.initialize()
@@ -126,6 +151,47 @@ def test_official_sdk_over_real_sse_and_session_isolation(env):
                     result = await session.call_tool("get_feed", {})
                     assert result.structuredContent["profile"]["user_id"] == "alice"
 
+            for uid, client_headers in [
+                (None, discovery),
+                ("alice", headers),
+                (
+                    "bob",
+                    {
+                        **headers,
+                        "X-Linx-Device-Id": settings.bob_device_id,
+                        "X-Linx-Agent-Id": settings.bob_agent_id,
+                    },
+                ),
+            ]:
+                async with httpx.AsyncClient(headers=client_headers) as client:
+                    async with streamable_http_client(base + "/mcp/http", http_client=client) as (
+                        read,
+                        write,
+                        _,
+                    ):
+                        async with ClientSession(read, write) as session:
+                            await session.initialize()
+                            assert len((await session.list_tools()).tools) == 4
+                            result = await session.call_tool("probe", {})
+                            if uid is None:
+                                assert result.isError
+                                result = await session.call_tool(
+                                    "set_focus", {"expected_revision": 2, "mode": "listen"}
+                                )
+                                assert result.isError
+                            else:
+                                assert result.structuredContent["user_id"] == uid
+                                result = await session.call_tool("get_feed", {})
+                                assert result.structuredContent["profile"]["user_id"] == uid
+                                if uid == "alice":
+                                    result = await session.call_tool(
+                                        "set_focus", {"expected_revision": 2, "focus": "附近路况"}
+                                    )
+                                    assert not result.isError
+                                    assert (
+                                        result.structuredContent["profile"]["focus"] == "附近路况"
+                                    )
+
         asyncio.run(run())
         with httpx.Client() as client:
             # Capture a real Alice transport endpoint. Bob's valid headers must not inject into it.
@@ -144,6 +210,22 @@ def test_official_sdk_over_real_sse_and_session_isolation(env):
                     json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
                 )
                 assert response.status_code == 404
+                discovery_response = client.post(
+                    base + endpoint,
+                    headers={"Authorization": headers["Authorization"]},
+                    json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                )
+                assert discovery_response.status_code == 404
+            assert (
+                client.get(
+                    base + "/mcp",
+                    headers={
+                        "Authorization": headers["Authorization"],
+                        "X-Linx-Agent-Id": settings.alice_agent_id,
+                    },
+                ).status_code
+                == 401
+            )
             assert client.get(base + "/v1/me", headers=auth()).json()["profile"]["mode"] == "quiet"
             assert (
                 client.get(base + "/v1/me", headers=auth("bob")).json()["profile"]["mode"]

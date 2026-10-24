@@ -29,7 +29,10 @@ def test_complete_audible_fixture_and_idempotent_import(env):
     for clip in manifest["clips"]:
         data = (ASSETS / clip["file"]).read_bytes()
         assert hashlib.sha256(data).hexdigest() == clip["sha256"]
-        assert clip["transcript"].startswith(("模拟", "测试闲聊"))
+        assert clip["synthetic"]
+        assert "合成测试" in manifest["notice"]
+        if manifest["version"] <= 2:
+            assert clip["transcript"].startswith(("模拟", "测试闲聊"))
         with wave.open(io.BytesIO(data)) as wav:
             duration = wav.getnframes() / wav.getframerate()
             assert 0 < duration <= 8

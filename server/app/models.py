@@ -121,3 +121,28 @@ Draft = Annotated[
 
 class VoiceQueue(StrictModel):
     client_request_id: UUID | None = None
+
+
+class ExchangeStart(StrictModel):
+    client_request_id: UUID
+    expected_revision: int = Field(ge=1)
+    place_id: str = Field(min_length=1, max_length=100)
+    auto_publish: bool = Field(strict=True)
+    auto_play: bool = Field(strict=True)
+
+
+class ExchangeChange(StrictModel):
+    expected_session_revision: int = Field(ge=1)
+    state: Literal["active", "paused", "ended"]
+
+
+class ExchangeContext(StrictModel):
+    expected_session_revision: int = Field(ge=1)
+    post_id: str = Field(min_length=1, max_length=100)
+
+
+class ExchangeUtterance(StrictModel):
+    client_request_id: UUID
+    expected_session_revision: int = Field(ge=1)
+    transcript: Text
+    recorded_at: AwareDatetime

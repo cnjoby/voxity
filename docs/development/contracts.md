@@ -147,9 +147,11 @@ invitation 只提示一次；录音、TTS 或本地缓冲未清空时先等待�
 
 ## 5. Linx MCP 边界
 
-采用架构既定的云端 SSE MCP，由服务端角色完成平台实测和配置。Linx 设备注册、握手、编解码和音频帧遵守官方协议，本文不自创替代协议。Token、Agent 与设备实际配置写到本地环境文件，提交示例时只留占位符。
+云端 MCP 提供 Streamable HTTP `POST /mcp/http`，兼容原 SSE `GET /mcp` 与 `POST /mcp/message/`。2026-10-24 灵矽控制台的新服务只接受 Streamable HTTP，平台实例设置 `config.type="sse"`、`config.transport_type=1`；`sse` 是平台配置结构名，不表示实际使用旧 SSE 传输。配置与分项验收见[灵矽智能体与 MCP](linx-platform.md)。Linx 设备注册、握手、编解码和音频帧遵守官方协议。Token、Agent 与设备实际配置写到私有环境文件，提交示例时只留占位符。
 
 必须先验证可用的 MCP 调用凭证，再依据经过验证的设备/Agent/Session 映射用户。身份 Header 本身不证明可信；无法验证时禁用远程工具并报告阻塞，客户端业务 API 可继续开发，不能宣称完成 Linx 联调。
+
+控制台在没有设备会话时，仅携专用 Bearer 可初始化协议和发现工具 Schema，调用任何工具都返回 `MCP_IDENTITY_MISSING`，不读取或修改个人业务状态。部分身份 Header 缺失仍拒绝；真实业务调用必须同时具备可信 Bearer、Device、Agent、Session 和已登记的用户映射。无身份工具发现与各用户 SSE 会话隔离；Streamable HTTP 每个请求独立鉴权并使用无状态传输。
 
 | 工具 | 输入 | 输出与约束 |
 | --- | --- | --- |
@@ -182,3 +184,8 @@ get_feed 的 request_id 在服务器内存保存已授权候选、用户与版�
 ## 9. 三类声音兼容扩展
 
 2026-10-24 已新增 reply/scene/knowledge/announcement 草稿、地点浏览、频道授权、访问去重与独立收听设置；原 question/answer 字段及行为兼容。增量字段、HTTP 接口、期限和验收见[声音匹配实现协议](voice-matching.md)。私聊、实时对讲及后台唤醒未开放。
+
+
+## 10. 自然现场交流（2026-10-25）
+
+[自然交流接口与实现](natural-exchange.md)新增独立 exchange 会话、自然 utterance、相关原声 inbox 和当前原声 context。用户在会话层分别授权自动发布与收听，逐条手动确认不再是该模式默认路径；旧手动草稿协议保留。scene 可以成为真实回复根，不能伪造 question/invitation。正常成功不播系统控制声音。物理范围、时效、访问、版本和播放回执仍由确定性规则复核。Android 与服务端已有实现，ESP32 与车内声学待验收。

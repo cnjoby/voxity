@@ -4,7 +4,9 @@
 
 ## 开发入口
 
-- [App 与 ESP32 车用免提交互约束](ux-designs/ux-sonar-2026-10-24/EXPERIENCE.md)：统一语音流程、公开确认、打断/静音、通知节制、平台差异及验收；[状态预览](ux-designs/ux-sonar-2026-10-24/mockups/handsfree-states.html)。设计提案，功能待实现及实机验证。
+- [App 与 ESP32 车用免提交互约束](ux-designs/ux-sonar-2026-10-24/EXPERIENCE.md)：统一自然交流、会话授权、打断/静音、通知节制、平台差异及验收；[状态预览](ux-designs/ux-sonar-2026-10-24/mockups/handsfree-states.html)。Android 与服务端已有增量实现，ESP32 与真实车内体验待验收。
+- [自然交流发布审查](../development/review-20261025.md)：审查发现、修复、回归与服务器发布约束。
+- [自然交流实现与接口](../development/natural-exchange.md)：自动发布、相关原声播放、独立会话授权、失败处理及分项验证。
 - [ESP32 独立开发交接书](../development/esp32-ai-handoff.md)：可单独转发，内含免提要求、完整必要接口、Linx 消息、AI 提示词与交付检查。
 - [两天开发任务入口](../../two-day-development.md)：三端排期、AI 任务包、接口契约与联调验收。
 - [产品定义](personal-agent-concept.md)：人、广场与个人 Agent 的职责及核心场景。
@@ -12,6 +14,7 @@
 - [声音匹配实现与验收](../development/voice-matching.md)：新增协议、权限、访问、回执与隔离模拟器复跑。
 - [两天黑客松架构](architecture.md)：主流程、ESP32、Android、Linx、单机服务、接口及验收。
 - [Android 接入灵矽](../development/linx-android.md)：OTA 激活、绑定、PCM/Opus、私有语音测试与真实平台验收边界。
+- [灵矽智能体与 MCP 配置](../development/linx-platform.md)：平台私有服务、Streamable HTTP、设备身份映射及分项验收。
 - [个人声音决策](attention-decisions.md)：Bamboo/StartLux 已参与实际邀请筛选，包含规则复核、后台调用、缓存及失败处理。
 - [真实位置与地点关联](location-and-places.md)：前台定位、消息位置快照、目标地点、空间召回与个人策略的分工（已实现，实机待验收）。
 - [架构评审](architecture-review.md)：两天交付判断、接入风险与核心理念的演示条件。

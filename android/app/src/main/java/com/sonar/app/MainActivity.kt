@@ -13,16 +13,31 @@ class MainActivity : ComponentActivity() {
     private lateinit var model: SonarViewModel
     private var pendingReply: Delivery? = null
     private var pendingLinx = false
+    private var pendingExchange: Pair<Boolean, Boolean>? = null
     private val microphone =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             if (granted) {
-                if (pendingLinx) model.recordLinx() else model.record(pendingReply)
+                val exchange = pendingExchange
+                if (exchange != null) model.startExchange(exchange.first, exchange.second)
+                else if (pendingLinx) model.recordLinx() else model.record(pendingReply)
             } else {
                 model.clearComposition()
                 model.notice("需要麦克风权限才能录音；可在系统设置中开启")
             }
             pendingReply = null
             pendingLinx = false
+            pendingExchange = null
+        }
+
+    private val exchangePermissions =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+            val pending = pendingExchange
+            pendingExchange = null
+            val mic = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+            val notifications = android.os.Build.VERSION.SDK_INT < 33 ||
+                ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+            if (pending != null && mic && notifications) model.startExchange(pending.first, pending.second)
+            else model.notice("请停车后允许麦克风和通知；通知提供后台安静与结束入口")
         }
 
     private val locationPermission =
@@ -49,6 +64,16 @@ class MainActivity : ComponentActivity() {
             SonarScreen(
                 model,
                 onLocate = ::locate,
+                onExchangeStart = { publish, play ->
+                    val needed = mutableListOf(Manifest.permission.RECORD_AUDIO)
+                    if (android.os.Build.VERSION.SDK_INT >= 33) needed.add(Manifest.permission.POST_NOTIFICATIONS)
+                    if (needed.all { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED })
+                        model.startExchange(publish, play)
+                    else {
+                        pendingExchange = publish to play
+                        exchangePermissions.launch(needed.toTypedArray())
+                    }
+                },
                 onLinxRecord = {
                     pendingLinx = true
                     if (
