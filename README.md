@@ -6,7 +6,7 @@
 
 两天黑客松原型：Android 定位并提问，处在目标附近且愿意互助的参与者收到邀请，自愿回答后提问者听到原声。自有业务服务单机部署，语音交互计划接入 Linx；ESP32 由硬件成员实现。
 
-自然现场交流 `v0.1.1`：一次授权后自动分享明确现场原声，在空隙接续相关真人回复，正常路径保持安静。[接口与能力边界](docs/development/natural-exchange.md) · [发布审查](docs/development/review-20261025.md)。
+自然现场交流 `v0.1.1`：一次授权后自动分享明确现场原声，在空隙接续相关真人回复，正常路径保持安静。[接口与能力边界](docs/development/natural-exchange.md) · [发布审查](docs/development/review-20261025.md) · [最新部署](deploy/deployment-20261025.md) · [APK 下载](https://github.com/cnjoby/voxity/releases/tag/v0.1.1)。
 
 ## 工程入口
 
