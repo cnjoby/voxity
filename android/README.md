@@ -45,13 +45,11 @@ Debug HTTP只允许上述本机域名；其他地址及 Release 均要求 HTTPS�
 
 Android也提供邀请提示、拒绝和录音回应入口。只有当前有效邀请可进入回复，问题ID自动绑定；这部分尚未完成与ESP32的实测。
 
-## Linx 接入边界
+## Linx 手机接入
 
-连接设置可填已绑定设备的 WSS 地址、Device ID 和设备Token，Client ID由应用生成并私有保存。代码参考[官方设备协议](https://linx.qiniu.com/docs/xrobot/platform/websocket)。
+“我的 → 灵矽语音”已提供 OTA 激活码、控制台绑定状态检查、连接配置加密保存，以及独立的录音识别/AI 回复播放测试。无需先配置 Sonar 就能测试语音。PCM 与 Opus 在本机模拟协议下已跑通；vivo 真机已绑定，内置录音的真实 STT/TTS 检查通过，用户也确认“试说一句”收到对话回复。另一次真人自动检查超时，保留为失败。完整步骤与分项证据见[Android 接入灵矽](../docs/development/linx-android.md)。
 
-当前适配采用每条录音一个新会话，手动listen/start/stop，上传本轮PCM片段并取得待核对的STT候选；同一时刻只处理一条录音。只支持协商为16kHz单声道PCM，平台返回Opus会明确失败，不混传编码。没有“最终STT”协议保证，多个识别候选或超时不发布。候选仍需本人听原声确认。
-
-**真实设备激活/注册、STT配对、Opus编解码及Linx TTS语音对话未验收。** 目前不播放平台TTS，收到TTS开始即中止；不能称为完整Linx语音助手。自然语言修改互助/安静也需后续实测，当前通过应用开关对接服务端真实个人配置。
+该页的测试不会发布到广场。首页公开录音仍须核对原声和识别候选；Debug 手动转写开关与 Linx 语音测试独立。后台唤醒、实时全双工及 Sonar 云端 MCP 尚未验收。
 
 ## 检查与复测
 
@@ -66,4 +64,24 @@ python3 tools/run_live_flow.py --serial YOUR_SERIAL --synthetic-peer
 
 这里直接使用 adb instrumentation，而非 Gradle connected任务，是为了避免安装/卸载过程清除私有配置。报告：`build/reports/live-flow/instrumentation.txt`、`peer.txt`、`answered.png`；单元报告：`app/build/reports/tests/testDebugUnitTest/`；Lint：`app/build/reports/lint-results-debug.html`。完整当前结果见 [HANDOFF](HANDOFF.md)。
 
-核心文件：SonarApi（业务HTTP）、SonarViewModel（任务流程）、AudioCoordinator（录放互斥）、TaskStore（私有恢复和回执）、LinxSession（待实测的语音识别适配）。字段遵守[三端契约](../docs/development/contracts.md)，不另设广场筛选逻辑。
+核心文件：SonarApi（业务HTTP）、SonarViewModel（任务流程）、AudioCoordinator（录放互斥）、TaskStore（私有恢复和回执）、LinxGateway/LinxSession/LinxCodec（激活、语音协议与系统音频编解码，真实 PCM 语音已实测）。字段遵守[三端契约](../docs/development/contracts.md)，不另设广场筛选逻辑。
+
+## 真实定位与 POI
+
+正常 Debug 配置默认使用 Android 前台 GPS/网络定位。首次点击说话请求定位，地点解析后再点说话；点地点名可选附近 POI 或搜索远处目标。高德 Key 仅由服务端配置。定位粗略或拒绝授权时允许手选询问地点，不自动把用户标成现场。详见[定位契约与验证](../docs/development/location.md)。
+
+`tools/configure_device.py --simulated-location` 仅供旧固定地点演示；默认不启用。双 Android 用户的隔离模拟器闭环：`uv run --project server python android/tools/run_nearby_flow.py --serial emulator-5554 --two-clients`，使用真实高德和注入坐标，包含双方录音、手动测试文字、提示后回应与原声播放。不能代替两台真机或真人 STT 验收。
+
+## 个人 Agent 筛选
+
+“我的 → 我关心什么”保存个人关注，静音与互助开关不会改写关注。服务端开启 Bamboo 时，邀请经过位置/时效/意愿规则、个人决策及再次复核后进入客户端。首页无需配置模型或 Key，原声回答继续按原任务收听。
+
+真实模型完整检查在定位命令后增加 `--decisions`，报告写入 `build/reports/decision-flow/`；包含无关话题被忽略、静音没有候选，以及两个 Android 用户会话的提示和回应。仍使用注入坐标与手动测试文字，不能替代真机和真人转写验收。
+
+## 三类声音扩展
+
+本轮增加情境原声发布/浏览、POI 授权频道及版本公告、公开问答连续定向回复；静音、回复、运营频道、情境与互助各自按规则处理。接口、配置、授权命令、访问去重与复测见[声音匹配实现与验收](../docs/development/voice-matching.md)。实体到达、楼层与真人语音仍待验证。
+
+## 张江测试音频与位置切换
+
+首页「模拟位置」可直接选择三个张江测试地点，每处 12 条公告、路况与闲聊，随 APK 离线试听；「手机真实位置」退出测试并请求 GPS / 网络定位。模拟来源始终可见，不获得真实在场资格。素材、可选服务端导入和验收边界见[测试音频说明](../docs/development/demo-audio.md)。

@@ -22,7 +22,10 @@ data class DeviceConfig(
     val linxUrl: String = "wss://xrobo-io.qiniuapi.com/v1/ws/",
     val linxToken: String = "",
     val linxDevice: String = "",
-    val clientId: String = UUID.randomUUID().toString(),
+    val clientId: String = "",
+    val simulatedLocation: Boolean = false,
+    val linxOtaUrl: String = LINX_OTA,
+    val testPlaceId: String = "",
 ) {
     fun toJson() =
         json(
@@ -34,6 +37,9 @@ data class DeviceConfig(
             "linx_token" to linxToken,
             "linx_device" to linxDevice,
             "client_id" to clientId,
+            "simulated_location" to simulatedLocation,
+            "linx_ota_url" to linxOtaUrl,
+            "test_place_id" to testPlaceId,
         )
 
     val scope
@@ -53,7 +59,10 @@ data class DeviceConfig(
                 j.text("linx_url", "wss://xrobo-io.qiniuapi.com/v1/ws/"),
                 j.text("linx_token"),
                 j.text("linx_device"),
-                j.text("client_id").ifBlank { UUID.randomUUID().toString() },
+                j.text("client_id"),
+                j.optBoolean("simulated_location"),
+                j.text("linx_ota_url", LINX_OTA),
+                j.text("test_place_id"),
             )
     }
 }
@@ -61,6 +70,36 @@ data class DeviceConfig(
 /** Credentials never enter BuildConfig/resources/APK; private storage encrypted with Keystore. */
 class ConfigStore(private val context: Context) {
     private val prefs = context.getSharedPreferences("connection", Context.MODE_PRIVATE)
+    private val identity = context.getSharedPreferences("linx-identity", Context.MODE_PRIVATE)
+
+    @Synchronized
+    fun normalize(config: DeviceConfig): DeviceConfig {
+        val client =
+            identity.getString("client", null)
+                ?: config.clientId.ifBlank { UUID.randomUUID().toString() }
+        val device =
+            identity.getString("device", null)
+                ?: config.linxDevice.takeIf { it.isNotBlank() }
+                ?: run {
+                    val androidId =
+                        android.provider.Settings.Secure.getString(
+                                context.contentResolver,
+                                android.provider.Settings.Secure.ANDROID_ID,
+                            )
+                            .orEmpty()
+                    val hash =
+                        MessageDigest.getInstance("SHA-256")
+                            .digest("sonar-android|$androidId|$client".toByteArray())
+                    hash[0] = ((hash[0].toInt() and 0xfc) or 0x02).toByte()
+                    hash.take(6).joinToString(":") { "%02X".format(it.toInt() and 255) }
+                }
+        check(identity.edit().putString("client", client).putString("device", device).commit())
+        return config.copy(
+            linxDevice = config.linxDevice.ifBlank { device },
+            clientId = config.clientId.ifBlank { client },
+            linxOtaUrl = if (BuildConfig.DEBUG) config.linxOtaUrl else LINX_OTA,
+        )
+    }
 
     private fun key(): SecretKey {
         val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
@@ -85,7 +124,7 @@ class ConfigStore(private val context: Context) {
     fun save(config: DeviceConfig) {
         val cipher =
             Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, key()) }
-        val data = cipher.doFinal(config.toJson().toString().toByteArray())
+        val data = cipher.doFinal(normalize(config).toJson().toString().toByteArray())
         check(
             prefs
                 .edit()
@@ -99,13 +138,13 @@ class ConfigStore(private val context: Context) {
         if (BuildConfig.DEBUG) {
             val bootstrap = File(context.filesDir, "bootstrap.json")
             if (bootstrap.exists()) {
-                val config = DeviceConfig.parse(JSONObject(bootstrap.readText()))
+                val config = normalize(DeviceConfig.parse(JSONObject(bootstrap.readText())))
                 save(config)
                 check(bootstrap.delete())
                 return config
             }
         }
-        val sealed = prefs.getString("sealed", null) ?: return DeviceConfig()
+        val sealed = prefs.getString("sealed", null) ?: return normalize(DeviceConfig())
         return runCatching {
                 val cipher =
                     Cipher.getInstance("AES/GCM/NoPadding").apply {
@@ -118,8 +157,10 @@ class ConfigStore(private val context: Context) {
                             ),
                         )
                     }
-                DeviceConfig.parse(
-                    JSONObject(String(cipher.doFinal(Base64.decode(sealed, Base64.NO_WRAP))))
+                normalize(
+                    DeviceConfig.parse(
+                        JSONObject(String(cipher.doFinal(Base64.decode(sealed, Base64.NO_WRAP))))
+                    )
                 )
             }
             .getOrElse { throw IllegalStateException("无法解锁本机配置，请清除应用数据后重新配置") }
@@ -157,16 +198,26 @@ class TaskStore(context: Context, scope: String) {
 
     fun attempted(key: String) =
         prefs.contains("attempt:$key") ||
-            prefs.contains("attempt-delivery:${key.substringBefore(":")}")
+            (!key.contains(":visit:") &&
+                prefs.contains("attempt-delivery:${key.substringBefore(":")}"))
 
     fun markAttempt(key: String) {
         check(
             prefs
                 .edit()
                 .putBoolean("attempt:$key", true)
-                .putBoolean("attempt-delivery:${key.substringBefore(":")}", true)
+                .apply {
+                    if (!key.contains(":visit:"))
+                        putBoolean("attempt-delivery:${key.substringBefore(":")}", true)
+                }
                 .commit()
         )
+    }
+
+    fun deferred(key: String) = prefs.getBoolean("defer:$key", false)
+
+    fun defer(key: String, value: Boolean) {
+        check(prefs.edit().putBoolean("defer:$key", value).commit())
     }
 
     fun queueAck(d: Delivery, event: String) {
@@ -180,6 +231,7 @@ class TaskStore(context: Context, scope: String) {
                             "request_id" to d.requestId,
                             "event" to event,
                             "post_id" to d.payload.text("post_id"),
+                            "visit_id" to d.payload.text("visit_id"),
                         )
                         .toString(),
                 )

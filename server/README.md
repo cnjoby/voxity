@@ -54,5 +54,15 @@ uv run python ../scripts/smoke_http.py --base-url http://127.0.0.1:8765 --rounds
 - 静音保留自己的问题与待听回复，撤销收到的有效邀请。回答与播放是独立状态。
 - 超时在业务访问时处理，不运行额外调度系统；重启后首个请求即复核有效性。事务内不调用平台或外部网络。
 - 发布状态与交付入队在同一 SQLite 事务；原声在数据库提交前落盘。意外断电可能留下未引用的文件，不会使其公开。
-- 使用整段 WAV 下载，无 Range、GPS、离线系统推送或全城推荐。SSE 与候选快照要求一个应用进程，不能启动多个 worker。
+- 使用整段 WAV 下载，无 Range、离线系统推送或全城推荐；Android 前台定位与 POI 接口见[定位接入](../docs/development/location.md)。SSE 与候选快照要求一个应用进程，不能启动多个 worker。
 - 服务端不能证明喇叭真正播过；played 是客户端回执，设备必须独立验收。
+
+## 位置与决策配置
+
+[定位接入](../docs/development/location.md)定义真实位置、POI 和附近邀请。高德 Web Key 仅放在本地 `.env` 的 `SONAR_AMAP_KEY`；缺失时地点接口明确返回 503。默认不允许模拟器位置取得真实附近资格，测试须使用隔离库。
+
+[Bamboo 决策适配](../docs/design/attention-decisions.md)使用 `SONAR_BAMBOO_API_KEY` 和原生决策接口。设置 `SONAR_DECISION_ENABLED=true` 后参与实际邀请：规则召回、后台决策、规则复核、notify 才提醒。超时/故障暂缓并缓存，不阻塞问答 HTTP；自己的回答原声照常送达。本机已开启；仍限单应用进程。
+
+## 三类声音扩展
+
+本轮增加情境原声发布/浏览、POI 授权频道及版本公告、公开问答连续定向回复；静音、回复、运营频道、情境与互助各自按规则处理。接口、配置、授权命令、访问去重与复测见[声音匹配实现与验收](../docs/development/voice-matching.md)。实体到达、楼层与真人语音仍待验证。

@@ -30,3 +30,45 @@ CREATE TABLE IF NOT EXISTS deliveries (
 );
 CREATE INDEX IF NOT EXISTS recipient_queue ON deliveries(recipient_id, state, created_at);
 CREATE INDEX IF NOT EXISTS question_deliveries ON deliveries(question_id);
+
+CREATE TABLE IF NOT EXISTS places (
+ id TEXT PRIMARY KEY, label TEXT NOT NULL, latitude REAL NOT NULL,
+ longitude REAL NOT NULL, kind TEXT NOT NULL, created_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+ id TEXT PRIMARY KEY, applied_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS voice_settings (
+ user_id TEXT PRIMARY KEY REFERENCES users(id), settings_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS channels (
+ id TEXT PRIMARY KEY, place_id TEXT NOT NULL REFERENCES places(id),
+ label TEXT NOT NULL, operator_label TEXT NOT NULL, demo INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS channel_operators (
+ channel_id TEXT NOT NULL REFERENCES channels(id), user_id TEXT NOT NULL REFERENCES users(id),
+ PRIMARY KEY(channel_id,user_id)
+);
+CREATE TABLE IF NOT EXISTS voice_details (
+ post_id TEXT PRIMARY KEY REFERENCES posts(id), metadata_json TEXT NOT NULL,
+ withdrawn_at REAL, replaced_by TEXT REFERENCES posts(id)
+);
+CREATE TABLE IF NOT EXISTS voice_visits (
+ user_id TEXT NOT NULL REFERENCES users(id), place_id TEXT NOT NULL REFERENCES places(id),
+ visit_id TEXT NOT NULL, outside_since REAL, scene_count INTEGER NOT NULL DEFAULT 0,
+ last_scene_at REAL, PRIMARY KEY(user_id,place_id)
+);
+CREATE INDEX IF NOT EXISTS voice_place ON posts(target_place_id,kind,status);
+CREATE TABLE IF NOT EXISTS delivery_receipts (
+ delivery_id TEXT NOT NULL, request_id TEXT NOT NULL,
+ recipient_id TEXT NOT NULL REFERENCES users(id), post_id TEXT NOT NULL REFERENCES posts(id),
+ visit_id TEXT, event TEXT NOT NULL, recorded_at REAL NOT NULL,
+ PRIMARY KEY(delivery_id, request_id, event)
+);
+CREATE TABLE IF NOT EXISTS voice_queue_requests (
+ user_id TEXT NOT NULL REFERENCES users(id), command_id TEXT NOT NULL,
+ post_id TEXT NOT NULL REFERENCES posts(id), delivery_id TEXT NOT NULL,
+ request_id TEXT NOT NULL, PRIMARY KEY(user_id,command_id)
+);

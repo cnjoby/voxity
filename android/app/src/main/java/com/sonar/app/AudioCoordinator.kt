@@ -21,7 +21,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 
 object Wav {
-    fun header(bytes: Int): ByteArray =
+    fun header(bytes: Int, sampleRate: Int = 16000): ByteArray =
         ByteBuffer.allocate(44)
             .order(ByteOrder.LITTLE_ENDIAN)
             .apply {
@@ -31,8 +31,8 @@ object Wav {
                 putInt(16)
                 putShort(1)
                 putShort(1)
-                putInt(16000)
-                putInt(32000)
+                putInt(sampleRate)
+                putInt(sampleRate * 2)
                 putShort(2)
                 putShort(16)
                 put("data".toByteArray())

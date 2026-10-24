@@ -1,0 +1,7 @@
+# Isolated asset-generation environment; not an Android/server runtime dependency.
+mlx-audio==0.6.1
+mlx==0.32.4
+numpy==2.5.4
+scipy==1.18.1
+transformers==5.20.2
+huggingface-hub==2.3.0

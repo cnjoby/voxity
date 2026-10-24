@@ -6,9 +6,12 @@ from datetime import UTC, datetime
 
 from .audio import validate_wav
 from .config import Settings
+from .decision import BambooDecision
 from .errors import Problem
-from .models import AnswerDraft, Context
+from .geo import AMap, distance_m, sampled_epoch
+from .models import AnswerDraft, Context, QuestionDraft, ReplyDraft, VoiceDraft
 from .storage import Database, digest
+from .voices import VoiceRules
 
 
 def stamp(value):
@@ -23,12 +26,15 @@ def ident(prefix):
     return f"{prefix}_{secrets.token_hex(12)}"
 
 
-class Service:
+class Service(VoiceRules):
     def __init__(self, settings: Settings, clock=time.time):
         self.settings = settings
         self.clock = clock
         self.store = Database(settings.data_dir)
         self.feeds = {}
+        self.geo = AMap(settings.amap_key)
+        self.decider = BambooDecision(settings.bamboo_api_key, settings.bamboo_base_url)
+        self.migrate_legacy_focus()
 
     @contextmanager
     def scope(self):
@@ -38,6 +44,27 @@ class Service:
 
     def now(self):
         return {"server_time": stamp(self.clock())}
+
+    def migrate_legacy_focus(self):
+        # The old Android quiet toggle wrote this status into the semantic focus.
+        # One-time repair only: later explicit user preferences are never rewritten.
+        with self.scope() as db:
+            marker = "attention_legacy_quiet_focus_v1"
+            if db.execute("SELECT 1 FROM schema_migrations WHERE id=?", (marker,)).fetchone():
+                return
+            for p in db.execute("SELECT * FROM profiles WHERE focus='现在安静'").fetchall():
+                self.context(
+                    db,
+                    p["user_id"],
+                    Context(
+                        expected_revision=p["revision"],
+                        mode=p["mode"],
+                        assist_enabled=bool(p["assist_enabled"]),
+                        focus="愿意回答附近路口的拥堵问题",
+                    ),
+                    refresh_presence=False,
+                )
+            db.execute("INSERT INTO schema_migrations VALUES (?,?)", (marker, self.clock()))
 
     def seed(self):
         s = self.settings
@@ -55,7 +82,7 @@ class Service:
                     (user, digest(token), device, agent),
                 )
                 db.execute(
-                    "INSERT OR IGNORE INTO profiles VALUES (?,?,?,?,?,?,?,?,?)",
+                    "INSERT OR IGNORE INTO profiles (user_id,place_id,direction,source,updated_at,assist_enabled,mode,focus,revision) VALUES (?,?,?,?,?,?,?,?,?)",
                     (
                         user,
                         place,
@@ -91,11 +118,20 @@ class Service:
                 "direction": p["direction"],
                 "source": p["source"],
                 "updated_at": stamp(p["updated_at"]),
+                **(
+                    {
+                        "location": json.loads(p["location_json"]),
+                        "place_name": self.place_label(db, p["place_id"]),
+                    }
+                    if p["location_json"]
+                    else {}
+                ),
             },
             "assist_enabled": bool(p["assist_enabled"]),
             "mode": p["mode"],
             "focus": p["focus"],
             "revision": p["revision"],
+            "listening": self.listening(db, user),
         }
 
     def me(self, db, user):
@@ -112,13 +148,101 @@ class Service:
             **self.now(),
         }
 
+    def place_label(self, db, place_id):
+        row = db.execute("SELECT label FROM places WHERE id=?", (place_id,)).fetchone()
+        return row["label"] if row else "位置待更新"
+
+    def check_fix(self, fix):
+        age = self.clock() - sampled_epoch(fix)
+        if age < -10 or age >= self.settings.location_ttl:
+            raise Problem(422, "LOCATION_STALE", "定位已过期，请重新定位")
+
+    def update_location(self, db, user, data, resolved):
+        old = self.profile_row(db, user)
+        if old["revision"] != data.expected_revision:
+            raise Problem(409, "REVISION_CONFLICT", "设置已更新，请重试定位")
+        if data.location:
+            self.check_fix(data.location)
+            for place in resolved["places"]:
+                db.execute(
+                    "INSERT INTO places VALUES (?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET label=excluded.label",
+                    (
+                        place["id"],
+                        place["label"],
+                        place["latitude"],
+                        place["longitude"],
+                        place["kind"],
+                        self.clock(),
+                    ),
+                )
+            fix = data.location
+            place_id = resolved["places"][0]["id"]
+            source = fix.source
+            location_json = fix.model_dump_json()
+            latitude, longitude = resolved["latitude"], resolved["longitude"]
+            sampled, accuracy = sampled_epoch(fix), fix.accuracy_m
+        else:
+            place_id, source = "unavailable", "unavailable"
+            location_json = latitude = longitude = sampled = accuracy = None
+        changed = old["place_id"] != place_id or old["source"] != source
+        revision = old["revision"] + int(changed)
+        db.execute(
+            "UPDATE profiles SET place_id=?,direction='unknown',source=?,updated_at=?,revision=?,location_json=?,latitude=?,longitude=?,sampled_at=?,accuracy_m=? WHERE user_id=?",
+            (
+                place_id,
+                source,
+                self.clock(),
+                revision,
+                location_json,
+                latitude,
+                longitude,
+                sampled,
+                accuracy,
+                user,
+            ),
+        )
+        # Same immutable delivery content; location is revalidated before any playback.
+        if changed:
+            db.execute(
+                "UPDATE deliveries SET profile_revision=? WHERE recipient_id=? AND state IN ('pending','prompted')",
+                (revision, user),
+            )
+        self.expire(db)
+        self.invite_nearby(db, user)
+        return {
+            "profile": self.profile(db, user),
+            "places": resolved["places"] if resolved else [],
+            **self.now(),
+        }
+
+    def invite_nearby(self, db, user):
+        profile = self.profile_row(db, user)
+        for q in db.execute(
+            "SELECT * FROM posts WHERE question_status='waiting' AND author_id!=? AND target_latitude IS NOT NULL",
+            (user,),
+        ).fetchall():
+            if self.eligibility(profile, q) == "ELIGIBLE":
+                self.create_delivery(
+                    db,
+                    user,
+                    q["id"],
+                    q["id"],
+                    "invitation",
+                    min(q["expires_at"], self.clock() + self.settings.invitation_ttl),
+                )
+
     def context(self, db, user, data: Context, refresh_presence=True):
         old = self.profile(db, user)
         if old["revision"] != data.expected_revision:
             raise Problem(409, "REVISION_CONFLICT", "配置已改变，请重新读取")
+        row = self.profile_row(db, user)
+        presence = data.presence
         changed = (
-            data.presence.model_dump()
-            != {k: v for k, v in old["presence"].items() if k != "updated_at"}
+            (
+                presence is not None
+                and presence.model_dump()
+                != {k: old["presence"][k] for k in ("place_id", "direction", "source")}
+            )
             or data.assist_enabled != old["assist_enabled"]
             or data.mode != old["mode"]
             or data.focus != old["focus"]
@@ -127,10 +251,10 @@ class Service:
         db.execute(
             "UPDATE profiles SET place_id=?,direction=?,source=?,updated_at=?,assist_enabled=?,mode=?,focus=?,revision=? WHERE user_id=?",
             (
-                data.presence.place_id,
-                data.presence.direction,
-                data.presence.source,
-                self.clock() if refresh_presence else self.profile_row(db, user)["updated_at"],
+                presence.place_id if presence else row["place_id"],
+                presence.direction if presence else row["direction"],
+                presence.source if presence else row["source"],
+                self.clock() if refresh_presence and presence else row["updated_at"],
                 data.assist_enabled,
                 data.mode,
                 data.focus,
@@ -138,6 +262,11 @@ class Service:
                 user,
             ),
         )
+        if presence is not None:
+            db.execute(
+                "UPDATE profiles SET location_json=NULL,latitude=NULL,longitude=NULL,sampled_at=NULL,accuracy_m=NULL WHERE user_id=?",
+                (user,),
+            )
         if changed:
             reason = (
                 "MODE_QUIET"
@@ -165,6 +294,29 @@ class Service:
             return "MODE_QUIET"
         if not p["assist_enabled"]:
             return "ASSIST_DISABLED"
+        if question["target_latitude"] is not None:
+            if p["source"] not in ("android", "android_mock") or p["latitude"] is None:
+                return "LOCATION_MISMATCH"
+            if p["source"] == "android_mock" and not self.settings.allow_mock_location:
+                return "LOCATION_UNTRUSTED"
+            if p["sampled_at"] + self.settings.location_ttl <= self.clock():
+                return "PRESENCE_EXPIRED"
+            if p["accuracy_m"] > self.settings.location_accuracy_m:
+                return "LOCATION_IMPRECISE"
+            if (
+                distance_m(
+                    p["latitude"],
+                    p["longitude"],
+                    question["target_latitude"],
+                    question["target_longitude"],
+                )
+                + p["accuracy_m"]
+                > self.settings.nearby_radius_m
+            ):
+                return "LOCATION_MISMATCH"
+            return "ELIGIBLE"
+        if p["source"] != "simulated":
+            return "LOCATION_MISMATCH"
         if p["updated_at"] + self.settings.presence_ttl <= self.clock():
             return "PRESENCE_EXPIRED"
         if p["place_id"] != question["target_place_id"] or p["direction"] != question["direction"]:
@@ -193,6 +345,17 @@ class Service:
                 db.execute(
                     "UPDATE deliveries SET state=?,reason_code=? WHERE id=?",
                     ("expired" if reason == "TASK_EXPIRED" else "cancelled", reason, d["id"]),
+                )
+
+        for d in db.execute(
+            "SELECT * FROM deliveries WHERE voice_json IS NOT NULL AND state='pending'"
+        ).fetchall():
+            p = self.post(db, d["post_id"])
+            gate = self.voice_delivery_gate(db, d["recipient_id"], d, p)
+            if gate in ("VOICE_INACTIVE", "OUTSIDE_SCOPE"):
+                db.execute(
+                    "UPDATE deliveries SET state='cancelled',reason_code=? WHERE id=?",
+                    (gate, d["id"]),
                 )
 
         # Listening to an original question is authorized by its live invitation.
@@ -228,11 +391,13 @@ class Service:
             raise Problem(
                 410 if d["state"] == "expired" else 409, "INVITATION_INACTIVE", "邀请已结束"
             )
+        if not self.attention_approved(db, d):
+            raise Problem(409, "ATTENTION_NOT_APPROVED", "这条邀请尚未通过个人筛选")
         return self.post(db, qid)
 
     def draft(self, db, user, meta, audio):
         validate_wav(audio)
-        fields = meta.model_dump(mode="json")
+        fields = meta.model_dump(mode="json", exclude_none=True)
         fingerprint = digest(
             json.dumps(fields, sort_keys=True, ensure_ascii=False).encode() + audio
         )
@@ -247,8 +412,18 @@ class Service:
         if isinstance(meta, AnswerDraft):
             q = self.valid_invitation(db, user, meta.invitation_id, meta.reply_to)
             place, direction = q["target_place_id"], q["direction"]
+        elif isinstance(meta, ReplyDraft):
+            q = self.check_reply(db, user, fields)
+            place, direction = q["target_place_id"], q["direction"]
         else:
-            place, direction = meta.target_place_id, meta.direction
+            place, direction = meta.target_place_id, getattr(meta, "direction", "unknown")
+        target = None
+        if not isinstance(meta, (AnswerDraft, ReplyDraft)) and place != "zhonghuan_jinke":
+            target = db.execute("SELECT * FROM places WHERE id=?", (place,)).fetchone()
+            if not target:
+                raise Problem(422, "PLACE_UNKNOWN", "请重新选择询问地点")
+            if direction != "unknown":
+                raise Problem(422, "DIRECTION_UNKNOWN", "附近问答尚未验证道路方向")
         pid = ident("p")
         db.execute(
             "INSERT INTO posts (id,author_id,client_request_id,fingerprint,kind,transcript,target_place_id,direction,reply_to,invitation_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
@@ -266,6 +441,27 @@ class Service:
                 self.clock(),
             ),
         )
+        if isinstance(meta, AnswerDraft):
+            db.execute(
+                "UPDATE posts SET target_latitude=?,target_longitude=?,target_label=? WHERE id=?",
+                (q["target_latitude"], q["target_longitude"], q["target_label"], pid),
+            )
+        elif target:
+            db.execute(
+                "UPDATE posts SET target_latitude=?,target_longitude=?,target_label=? WHERE id=?",
+                (target["latitude"], target["longitude"], target["label"], pid),
+            )
+        if isinstance(meta, (QuestionDraft, AnswerDraft)):
+            self.save_qa_source(db, user, self.post(db, pid), fields)
+        if isinstance(meta, (VoiceDraft, ReplyDraft)):
+            self.save_voice_draft(db, user, pid, fields)
+        if meta.recorded_location:
+            fix = meta.recorded_location
+            if sampled_epoch(fix) > self.clock() + 10:
+                raise Problem(422, "LOCATION_TIME_INVALID", "录音位置时间无效")
+            db.execute(
+                "UPDATE posts SET recorded_location=? WHERE id=?", (fix.model_dump_json(), pid)
+            )
         # Generated names, never user-controlled paths. File exists before transaction commits.
         path = self.store.audio_dir / f"{pid}.wav"
         try:
@@ -283,6 +479,105 @@ class Service:
             "audio_url": f"/v1/audio/{p['id']}",
             **self.now(),
         }
+
+    def attention_key(self, profile, post):
+        return digest(
+            json.dumps(
+                [
+                    BambooDecision.policy_version,
+                    BambooDecision.model,
+                    profile["user_id"],
+                    post["id"],
+                    profile["focus"],
+                    post["transcript"],
+                    post["target_label"],
+                ],
+                ensure_ascii=False,
+            )
+        )
+
+    def attention_record(self, delivery):
+        try:
+            value = json.loads(delivery["attention_json"] or "null")
+            return value if isinstance(value, dict) else {}
+        except (ValueError, TypeError):
+            return {}
+
+    def attention_approved(self, db, delivery):
+        if not self.settings.decision_enabled:
+            return True
+        value = self.attention_record(delivery)
+        return value.get("action") == "notify" and value.get("input_key") == self.attention_key(
+            self.profile_row(db, delivery["recipient_id"]), self.post(db, delivery["post_id"])
+        )
+
+    def next_attention(self):
+        # Only short database work; the network request happens after this scope exits.
+        with self.scope() as db:
+            rows = db.execute(
+                "SELECT * FROM deliveries WHERE type='invitation' AND state='pending' AND attention_json IS NULL ORDER BY created_at,id LIMIT 50"
+            ).fetchall()
+            for d in rows:
+                profile = self.profile_row(db, d["recipient_id"])
+                post = self.post(db, d["question_id"])
+                if (
+                    post["author_id"] != d["recipient_id"]
+                    and post["question_status"] == "waiting"
+                    and self.eligibility(profile, post) == "ELIGIBLE"
+                ):
+                    return {
+                        "id": d["id"],
+                        "recipient_id": d["recipient_id"],
+                        "post_id": post["id"],
+                        "request_id": d["request_id"],
+                        "revision": profile["revision"],
+                        "input_key": self.attention_key(profile, post),
+                        "focus": profile["focus"],
+                        "transcript": post["transcript"],
+                        "context": {
+                            "kind": "question",
+                            "target_label": post["target_label"] or "中环路金科路口",
+                            "scope": "nearby"
+                            if post["target_latitude"] is not None
+                            else "simulated",
+                        },
+                    }
+        return None
+
+    def finish_attention(self, snapshot, result):
+        with self.scope() as db:
+            d = self.delivery_row(db, snapshot["recipient_id"], snapshot["id"])
+            p = self.profile_row(db, snapshot["recipient_id"])
+            q = self.post(db, snapshot["post_id"])
+            if (
+                d["state"] != "pending"
+                or d["attention_json"] is not None
+                or d["post_id"] != q["id"]
+                or d["request_id"] != snapshot["request_id"]
+                or p["revision"] != snapshot["revision"]
+                or d["profile_revision"] != p["revision"]
+                or self.attention_key(p, q) != snapshot["input_key"]
+                or q["author_id"] == p["user_id"]
+                or q["question_status"] != "waiting"
+                or self.eligibility(p, q) != "ELIGIBLE"
+            ):
+                return False
+            record = {
+                "action": result.action,
+                "reason": result.reason,
+                "confidence": result.confidence,
+                "none_probability": result.none_probability,
+                "input_key": snapshot["input_key"],
+                "profile_revision": p["revision"],
+                "provider": "bamboo",
+                "model": BambooDecision.model,
+                "policy_version": BambooDecision.policy_version,
+                "evaluated_at": stamp(self.clock()),
+            }
+            db.execute(
+                "UPDATE deliveries SET attention_json=? WHERE id=?", (json.dumps(record), d["id"])
+            )
+            return True
 
     def create_delivery(self, db, recipient, qid, pid, kind, ttl):
         db.execute(
@@ -308,6 +603,12 @@ class Service:
         p = self.post(db, pid)
         if p["author_id"] != user:
             raise Problem(404, "NOT_FOUND", "草稿不存在")
+        if p["kind"] in ("scene", "knowledge", "announcement", "reply"):
+            return (
+                self.confirm_voice(db, user, p)
+                if p["status"] != "published"
+                else self.voice_confirm_result(db, p)
+            )
         if p["status"] != "published":
             if p["kind"] == "question":
                 waiting = db.execute(
@@ -336,6 +637,10 @@ class Service:
                 q = self.valid_invitation(db, user, p["invitation_id"], p["reply_to"])
                 if q["question_status"] != "waiting":
                     raise Problem(409, "QUESTION_CLOSED", "提问已结束")
+                source, _ = self.voice_meta(db, pid)
+                self.check_channel_scope(
+                    db, user, (source or {}).get("channel_id"), q["target_place_id"]
+                )
                 db.execute(
                     "UPDATE posts SET status='published',published_at=? WHERE id=?",
                     (self.clock(), pid),
@@ -380,9 +685,13 @@ class Service:
         ).fetchone()
         return {
             "question_id": qid,
+            "target_place": {
+                "id": q["target_place_id"],
+                "label": q["target_label"] or "中环路金科路口",
+            },
             "status": q["question_status"],
             "expires_at": stamp(q["expires_at"]),
-            "answer": self.audio_payload(answer) if answer else None,
+            "answer": self.voice_payload(db, answer) if answer else None,
             "invite_outcome": invite["state"] if invite else "none",
             **self.now(),
         }
@@ -413,25 +722,70 @@ class Service:
         d = self.delivery_row(db, user, did)
         p = self.post(db, d["post_id"])
         reason = d["reason_code"]
-        actionable = d["state"] == "pending"
+        actionable = d["state"] == "pending" or (
+            d["type"] == "invitation" and d["state"] == "prompted"
+        )
         if not actionable:
             reason = reason if reason != "ELIGIBLE" else "ALREADY_HANDLED"
         elif self.profile_row(db, user)["mode"] == "quiet":
             actionable, reason = False, "MODE_QUIET"
+        if actionable and d["type"] == "invitation" and not self.attention_approved(db, d):
+            actionable, reason = False, "ATTENTION_NOT_APPROVED"
+        if (
+            actionable
+            and d["type"] == "audio"
+            and p["kind"] == "question"
+            and not self.can_read_audio(db, user, p)
+        ):
+            actionable, reason = False, "CANDIDATE_EXPIRED"
+        if actionable:
+            gate = self.voice_delivery_gate(db, user, d, p)
+            if gate:
+                actionable, reason = False, gate
         payload = (
-            self.audio_payload(p)
+            self.voice_payload(db, p)
             if d["type"] == "audio"
             else {
                 "transcript": p["transcript"],
+                "author_id": p["author_id"],
+                "author_label": f"参与者 {p['author_id']}",
+                "visibility": "public",
+                "operator_reply_channel": self.channel_reply_option(db, user, p["id"]),
                 "place_id": p["target_place_id"],
-                "place_name": "中环路金科路口"
-                if p["target_place_id"] == "zhonghuan_jinke"
-                else "模拟接近区域",
+                "place_name": p["target_label"] or "中环路金科路口",
+                "location_scope": "nearby" if p["target_latitude"] is not None else "simulated",
                 "direction": p["direction"],
                 "prompt_key": "onsite_question",
                 "question_audio_url": f"/v1/audio/{p['id']}",
+                **(
+                    {
+                        "attention": {
+                            "action": self.attention_record(d).get("action"),
+                            "provider": "bamboo",
+                            "model": BambooDecision.model,
+                        }
+                    }
+                    if self.settings.decision_enabled
+                    else {}
+                ),
             }
         )
+        data = json.loads(d["voice_json"] or "{}")
+        if d["type"] == "audio":
+            payload["reasons"] = data.get(
+                "reasons",
+                ["回复了你的问题"] if p["kind"] in ("answer", "reply") else ["你主动选择收听"],
+            )
+            payload["visit_id"] = data.get("visit_id")
+            payload["priority"] = (
+                0
+                if not data.get("automatic", True)
+                else 1
+                if p["kind"] in ("answer", "reply")
+                else 2
+                if p["kind"] == "announcement"
+                else 4
+            )
         return {
             "id": did,
             "type": d["type"],
@@ -446,13 +800,16 @@ class Service:
         }
 
     def inbox(self, db, user):
+        self.invite_nearby(db, user)
+        self.sync_voices(db, user)
         rows = db.execute(
-            "SELECT id FROM deliveries WHERE recipient_id=? AND state='pending' ORDER BY created_at,id LIMIT 10",
+            "SELECT id FROM deliveries WHERE recipient_id=? AND (state='pending' OR (type='invitation' AND state='prompted')) ORDER BY CASE WHEN type='audio' THEN 0 ELSE 1 END,created_at,id",
             (user,),
         ).fetchall()
         items = [self.delivery(db, user, d["id"]) for d in rows]
+        items.sort(key=lambda d: d["payload"].get("priority", 3))
         return {
-            "items": [d for d in items if d["type"] == "audio" or d["actionable"]],
+            "items": [d for d in items if d["type"] == "audio" or d["actionable"]][:10],
             **self.now(),
         }
 
@@ -460,6 +817,21 @@ class Service:
         d = self.delivery_row(db, user, did)
         if d["request_id"] != request_id:
             raise Problem(409, "REQUEST_CONFLICT", "播放请求已改变")
+        if event in ("received", "seen", "played", "skipped", "failed"):
+            data = json.loads(d["voice_json"] or "{}")
+            db.execute(
+                "INSERT OR IGNORE INTO delivery_receipts VALUES (?,?,?,?,?,?,?)",
+                (did, request_id, user, d["post_id"], data.get("visit_id"), event, self.clock()),
+            )
+        if event in ("received", "seen"):
+            column = "received_at" if event == "received" else "seen_at"
+            db.execute(
+                f"UPDATE deliveries SET {column}=COALESCE({column},?) WHERE id=?",
+                (self.clock(), did),
+            )
+            return {"delivery": self.delivery(db, user, did), **self.now()}
+        if event == "alerted" and d["type"] == "invitation" and not self.attention_approved(db, d):
+            raise Problem(409, "ATTENTION_NOT_APPROVED", "这条邀请尚未通过个人筛选")
         allowed = {
             "invitation": {"alerted": "prompted", "declined": "declined"},
             "audio": {"played": "played", "skipped": "skipped"},
@@ -473,6 +845,11 @@ class Service:
             ):
                 raise Problem(409, "INVALID_TRANSITION", "任务已结束")
             db.execute("UPDATE deliveries SET state=? WHERE id=?", (target, did))
+            if event == "played":
+                db.execute(
+                    "UPDATE deliveries SET played_at=COALESCE(played_at,?) WHERE id=?",
+                    (self.clock(), did),
+                )
         return {"delivery": self.delivery(db, user, did), **self.now()}
 
     def can_read_audio(self, db, user, p):
@@ -480,17 +857,35 @@ class Service:
             return True
         if p["status"] != "published":
             return False
+        source, _ = self.voice_meta(db, p["id"])
+        if source and source.get("channel_id") and not self.voice_live(db, p):
+            return False
+        if p["kind"] in ("scene", "knowledge", "announcement"):
+            return self.voice_live(db, p)
+        if p["kind"] == "reply":
+            meta, _ = self.voice_meta(db, p["id"])
+            return self.voice_live(db, p) and user in (p["author_id"], meta["recipient_id"])
         if p["kind"] == "answer":
             q = self.post(db, p["reply_to"])
             return (
                 q["author_id"] == user
                 and p["published_at"] + self.settings.audio_ttl > self.clock()
             )
+        if (
+            p["kind"] == "question"
+            and p["question_status"] == "answered"
+            and p["published_at"] + self.settings.audio_ttl > self.clock()
+        ):
+            if db.execute(
+                "SELECT 1 FROM posts WHERE kind='answer' AND reply_to=? AND author_id=? AND status='published'",
+                (p["id"], user),
+            ).fetchone():
+                return True
         d = db.execute(
-            "SELECT id FROM deliveries WHERE recipient_id=? AND post_id=? AND type='invitation' AND state IN ('pending','prompted')",
+            "SELECT * FROM deliveries WHERE recipient_id=? AND post_id=? AND type='invitation' AND state IN ('pending','prompted')",
             (user, p["id"]),
         ).fetchone()
-        return bool(d)
+        return bool(d) and self.attention_approved(db, d)
 
     def get_feed(self, db, user):
         now = self.clock()
@@ -500,9 +895,15 @@ class Service:
             "SELECT * FROM posts WHERE status='published' ORDER BY published_at DESC,id DESC LIMIT 100"
         ).fetchall()
         for p in rows:
-            if p["author_id"] == user or not self.can_read_audio(db, user, p):
+            if (
+                p["kind"] not in ("question", "answer")
+                or p["author_id"] == user
+                or not self.can_read_audio(db, user, p)
+            ):
                 continue
-            candidates.append(self.audio_payload(p))
+            if p["kind"] == "question" and p["question_status"] != "waiting":
+                continue
+            candidates.append(self.voice_payload(db, p))
             if len(candidates) >= 10:
                 break
         request_id = ident("feed")
@@ -527,7 +928,7 @@ class Service:
         p = self.profile(db, user)
         data = Context(
             expected_revision=expected_revision,
-            presence={k: v for k, v in p["presence"].items() if k != "updated_at"},
+            presence=None,
             mode=mode if mode is not None else p["mode"],
             assist_enabled=assist_enabled if assist_enabled is not None else p["assist_enabled"],
             focus=focus if focus is not None else p["focus"],
@@ -557,6 +958,18 @@ class Service:
                 "SELECT expires_at FROM deliveries WHERE recipient_id=? AND post_id=? AND type='invitation' AND state IN ('pending','prompted')",
                 (user, post_id),
             ).fetchone()
+            if not invite:
+                raise Problem(410, "CANDIDATE_EXPIRED", "现场邀请已结束，请查看对话上下文")
             expires = min(post["expires_at"], invite["expires_at"])
         d = self.create_delivery(db, user, qid, post_id, "audio", expires)
+        data = json.loads(d["voice_json"] or "{}")
+        reasons = data.get("reasons", ["回复了你的问题"] if post["kind"] == "answer" else [])
+        data.update(
+            {
+                "automatic": False,
+                "category": post["kind"],
+                "reasons": list(dict.fromkeys(reasons + ["你主动选择收听"])),
+            }
+        )
+        db.execute("UPDATE deliveries SET voice_json=? WHERE id=?", (json.dumps(data), d["id"]))
         return {"delivery_id": d["id"], "state": d["state"]}

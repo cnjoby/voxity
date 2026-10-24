@@ -16,7 +16,12 @@ import org.junit.Test
 
 class LiveFlowTest {
     @get:Rule(order = 0)
-    val permissions = GrantPermissionRule.grant(Manifest.permission.RECORD_AUDIO)
+    val permissions =
+        GrantPermissionRule.grant(
+            Manifest.permission.RECORD_AUDIO,
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION,
+        )
     @get:Rule(order = 1) val compose = createAndroidComposeRule<MainActivity>()
 
     @Test
@@ -28,13 +33,24 @@ class LiveFlowTest {
         val config = ConfigStore(compose.activity).load()
         assertFalse(config.mock)
         assertTrue(config.debugTranscript)
+        val nearby = InstrumentationRegistry.getArguments().getString("nearby") == "true"
+        if (nearby) {
+            assertFalse(config.simulatedLocation)
+            val vm =
+                androidx.lifecycle.ViewModelProvider(compose.activity)[SonarViewModel::class.java]
+            compose.waitUntil(45000) {
+                vm.state.value.selectedPlace != null && !vm.state.value.locating
+            }
+            assertNotEquals("zhonghuan_jinke", vm.state.value.selectedPlace!!.id)
+            assertNotEquals("simulated", vm.state.value.profile!!.presence.text("source"))
+        }
         compose.waitUntil(15000) {
-            compose.onAllNodesWithText("现场互助 · 已连接").fetchSemanticsNodes().isNotEmpty()
+            compose.onAllNodesWithText("已连接，可以录音提问").fetchSemanticsNodes().isNotEmpty()
         }
         if (compose.onAllNodesWithText("恢复收听").fetchSemanticsNodes().isNotEmpty()) {
             compose.onNodeWithTag("quiet").performScrollTo().performClick()
             compose.waitUntil(10000) {
-                compose.onAllNodesWithText("现在安静").fetchSemanticsNodes().isNotEmpty()
+                compose.onAllNodesWithText("安静一下").fetchSemanticsNodes().isNotEmpty()
             }
         }
         compose.onNodeWithTag("record").performScrollTo().performClick()
@@ -49,10 +65,64 @@ class LiveFlowTest {
         compose
             .onNodeWithTag("transcript")
             .performScrollTo()
-            .performTextInput("[Android联调手动转写] 现在中环路金科路口堵不堵？")
+            .performTextInput(
+                if (nearby) "[Android定位联调手动转写] 这里现在堵不堵？" else "[Android联调手动转写] 现在中环路金科路口堵不堵？"
+            )
+        if (nearby) {
+            val vm =
+                androidx.lifecycle.ViewModelProvider(compose.activity)[SonarViewModel::class.java]
+            val draft = vm.state.value.draft!!
+            assertNotNull(draft.recordedLocation)
+            assertEquals(
+                "wgs84",
+                org.json.JSONObject(draft.recordedLocation!!).text("coordinate_system"),
+            )
+            assertEquals("unknown", draft.metadata().text("direction"))
+        }
         compose.onNodeWithTag("publish").performScrollTo().performClick()
         compose.waitUntil(15000) {
             compose.onAllNodesWithText("正在替你等回复").fetchSemanticsNodes().isNotEmpty()
+        }
+        if (InstrumentationRegistry.getArguments().getString("two_clients") == "true") {
+            val vm =
+                androidx.lifecycle.ViewModelProvider(compose.activity)[SonarViewModel::class.java]
+            val bobConfig =
+                DeviceConfig.parse(
+                    org.json.JSONObject(
+                        File(compose.activity.filesDir, "nearby-peer.json").readText()
+                    )
+                )
+            compose.runOnIdle { vm.configure(bobConfig) }
+            compose.waitUntil(45000) { vm.state.value.deliveries.any { it.type == "invitation" } }
+            if (InstrumentationRegistry.getArguments().getString("decisions") == "true") {
+                val invitation = vm.state.value.deliveries.first { it.type == "invitation" }
+                val attention = invitation.payload.getJSONObject("attention")
+                assertEquals("bamboo", attention.text("provider"))
+                assertEquals("notify", attention.text("action"))
+            }
+            // Wait until the system prompt and ACK finish; the reply entry must remain visible.
+            compose.waitUntil(15000) {
+                vm.state.value.deliveries.any {
+                    it.type == "invitation" && it.state == "prompted"
+                } && vm.state.value.playing == null
+            }
+            compose.onNodeWithText("说一句回应").performScrollTo().assertIsEnabled()
+            val inviteImage = compose.onRoot().captureToImage().asAndroidBitmap()
+            File(compose.activity.filesDir, "test-nearby-invite.png").outputStream().use {
+                inviteImage.compress(Bitmap.CompressFormat.PNG, 100, it)
+            }
+            compose.onNodeWithText("说一句回应").performClick()
+            compose.waitUntil(5000) { vm.state.value.recording }
+            Thread.sleep(1200)
+            compose.onNodeWithTag("record").performScrollTo().performClick()
+            compose.waitUntil(5000) { vm.state.value.draft != null && !vm.state.value.recording }
+            compose
+                .onNodeWithTag("transcript")
+                .performScrollTo()
+                .performTextInput("[Android双用户手动转写] 这里现在有点堵。")
+            compose.onNodeWithTag("publish").performScrollTo().performClick()
+            compose.waitUntil(15000) { vm.state.value.draft == null && !vm.state.value.busy }
+            compose.runOnIdle { vm.configure(config) }
         }
         compose.waitUntil(30000) {
             compose
@@ -65,10 +135,14 @@ class LiveFlowTest {
         File(compose.activity.filesDir, "test-live-answer.png").outputStream().use {
             image.compress(Bitmap.CompressFormat.PNG, 100, it)
         }
+        val vm = androidx.lifecycle.ViewModelProvider(compose.activity)[SonarViewModel::class.java]
+        val savedFocus = vm.state.value.profile!!.focus
         compose.onNodeWithTag("quiet").performScrollTo().performClick()
         compose.waitUntil(10000) {
             compose.onAllNodesWithText("恢复收听").fetchSemanticsNodes().isNotEmpty()
         }
+        compose.waitUntil(10000) { vm.state.value.profile?.mode == "quiet" }
+        assertEquals(savedFocus, vm.state.value.profile!!.focus)
     }
 
     @Test

@@ -9,6 +9,17 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ClientRulesTest {
+    @Test
+    fun cachedCoordinateWithRefreshedElapsedTimeCannotBecomeFresh() {
+        val wall = 1_790_000_000_000L
+        val elapsed = 300_000_000_000L
+        assertTrue(freshLocationSample(wall - 1_000, elapsed - 1_000_000_000L, wall, elapsed))
+        assertFalse(freshLocationSample(wall - 254_000, elapsed - 1_000_000_000L, wall, elapsed))
+        assertFalse(freshLocationSample(wall - 1_000, elapsed - 56_000_000_000L, wall, elapsed))
+        assertFalse(freshLocationSample(wall + 11_000, elapsed, wall, elapsed))
+        assertFalse(freshLocationSample(wall, elapsed + 1, wall, elapsed))
+    }
+
     private fun fixture(name: String) =
         JSONObject(javaClass.classLoader!!.getResource(name)!!.readText())
 
@@ -189,6 +200,114 @@ class ClientRulesTest {
                 ),
             )
             assertEquals(2, server.requestCount)
+        }
+    }
+
+    @Test
+    fun locationSnapshotAndTargetRemainIndependentAcrossRecovery() {
+        val point =
+            json(
+                    "latitude" to 31.2,
+                    "longitude" to 121.5,
+                    "coordinate_system" to "wgs84",
+                    "accuracy_m" to 10,
+                    "sampled_at" to "2026-10-24T00:00:00Z",
+                    "source" to "android",
+                )
+                .toString()
+        val draft =
+            LocalDraft(
+                "clip",
+                "private.wav",
+                "那里堵不堵",
+                frozen = true,
+                targetPlaceId = "amap:remote",
+                targetLabel = "远处的路口",
+                recordedLocation = point,
+            )
+        val restored = LocalDraft.parse(draft.toJson())
+        assertEquals(draft, restored)
+        assertEquals("amap:remote", restored.metadata().text("target_place_id"))
+        assertEquals("unknown", restored.metadata().text("direction"))
+        assertEquals(
+            31.2,
+            restored.metadata().getJSONObject("recorded_location").getDouble("latitude"),
+            0.0,
+        )
+        val reply = draft.copy(replyTo = "q", invitationId = "invite")
+        assertFalse(reply.metadata().has("target_place_id"))
+        assertTrue(reply.metadata().has("recorded_location"))
+    }
+
+    @Test
+    fun publicVoiceAndDirectedReplyMetadataSurviveDraftRecovery() {
+        val voice =
+            LocalDraft(
+                "clip",
+                "private.wav",
+                "看落日",
+                targetPlaceId = "scenic",
+                voiceMetadata =
+                    json(
+                            "kind" to "scene",
+                            "target_place_id" to "scenic",
+                            "purpose" to "reflection",
+                            "visibility" to "public",
+                        )
+                        .toString(),
+            )
+        assertEquals(voice, LocalDraft.parse(voice.toJson()))
+        assertEquals("scene", voice.metadata().text("kind"))
+        assertFalse(voice.metadata().has("direction"))
+        val reply =
+            voice.copy(
+                replyTo = "question",
+                voiceMetadata =
+                    json(
+                            "kind" to "reply",
+                            "root_question_id" to "question",
+                            "reply_to" to "parent",
+                            "recipient_id" to "bob",
+                            "visibility" to "public",
+                        )
+                        .toString(),
+                replyQuote = "上一句话",
+            )
+        assertEquals(reply, LocalDraft.parse(reply.toJson()))
+        assertEquals("parent", reply.metadata().text("reply_to"))
+        assertEquals("bob", reply.metadata().text("recipient_id"))
+        assertFalse(reply.metadata().has("invitation_id"))
+        assertFalse(reply.metadata().has("target_place_id"))
+    }
+
+    @Test
+    fun receiptRetryDoesNotMarkANewVisitAsHeard() = runBlocking {
+        MockWebServer().use { server ->
+            val delivery = fixture("audio-delivery.json").put("request_id", "new-request")
+            delivery.getJSONObject("payload").put("visit_id", "new-visit")
+            server.enqueue(MockResponse().setResponseCode(409).setBody("{}"))
+            server.enqueue(MockResponse().setBody(json("delivery" to delivery).toString()))
+            val api = HttpSonarApi(server.url("/").toString(), "secret", ServerClock { 0 }, true)
+            sendStoredAck(
+                api,
+                json(
+                    "id" to delivery.getString("id"),
+                    "request_id" to "old-request",
+                    "post_id" to "a_demo_001",
+                    "visit_id" to "old-visit",
+                    "event" to "played",
+                ),
+            )
+            assertEquals(2, server.requestCount)
+            val newVisit = Delivery.parse(delivery)
+            val oldVisit =
+                Delivery.parse(
+                    JSONObject(delivery.toString()).apply {
+                        getJSONObject("payload").put("visit_id", "old-visit")
+                    }
+                )
+            assertNotEquals(newVisit.key, oldVisit.key)
+            assertEquals(newVisit.key, newVisit.copy(requestId = "rotated-for-mute").key)
         }
     }
 }

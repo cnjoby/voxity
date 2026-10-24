@@ -38,7 +38,8 @@ def test_three_rounds_http_core_and_original_audio(env):
         ack = {"event": "alerted", "request_id": d["request_id"]}
         assert c.post(f"/v1/inbox/{d['id']}/ack", headers=auth("bob"), json=ack).status_code == 200
         assert c.post(f"/v1/inbox/{d['id']}/ack", headers=auth("bob"), json=ack).status_code == 200
-        assert c.get("/v1/inbox", headers=auth("bob")).json()["items"] == []
+        still = c.get("/v1/inbox", headers=auth("bob")).json()["items"]
+        assert len(still) == 1 and still[0]["id"] == d["id"] and still[0]["state"] == "prompted"
         aid = answer(c, qid, d)
         result = c.get(f"/v1/questions/{qid}", headers=auth()).json()
         assert result["status"] == "answered" and result["answer"]["post_id"] == aid

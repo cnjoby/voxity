@@ -115,7 +115,7 @@ A 等待时每秒查询；answered 后停止等待查询并处理原声交付。
 
 统一 delivery 字段：`id, type, question_id, request_id, profile_revision, state, expires_at, actionable, reason_code, payload`。
 
-- `type=invitation`：state 为 pending/prompted/answered/declined/cancelled/expired；payload 含问题原文、地点名称、预录提示素材键 `onsite_question`、问题原声URL。inbox 只投递 pending 且当前可提示的邀请，prompted 不反复提示。
+- `type=invitation`：state 为 pending/prompted/answered/declined/cancelled/expired；payload 含问题原文、地点名称、预录提示素材键 `onsite_question`、问题原声URL。inbox 返回 pending 和仍可回答的 prompted 邀请；只对 pending 自动提示，prompted 保留回应入口，不反复提示。
 - `type=audio`：state 为 pending/played/skipped/cancelled/expired；payload 含 post_id、转写、来源、时间与 audio_url。quiet 时保留 pending，actionable=false，不自动播放；恢复 listen 后刷新 revision，再交付。
 - payload 的 URL 是同源相对路径，下载仍附带设备凭证；不得把凭证拼进 URL。固定系统提示素材由客户端打包，服务端给键，不新增公共素材下载权限。
 
@@ -166,3 +166,19 @@ get_feed 的 request_id 在服务器内存保存已授权候选、用户与版�
 两端各完成：手动开始/停止录音→Linx STT→同一轮本地原声→确认草稿；同时仅一个未完成轮次。Linx session_id 不能直接充当业务录音ID。必须记录实际 STT 完成/超时策略及实测，不假定协议存在 final 或业务 turn_id。
 
 关联不明、断连或超时均不发布。Android 可在明确标注的调试模式输入转写以测 API；ESP32 可用标注的预置音频与转写测试业务通道。模拟测试不能作为真实语音联调通过证据。最终验收至少一次真实提问和真实回答。
+
+## 7. 真实位置与附近问答扩展
+
+[定位接入契约](location.md)定义 PUT /v1/me/location、GET /v1/places、可选 recorded_location、真实 target_place_id 及附近邀请。旧模拟协议保留；context 可省略 presence，仅更新参与意愿，不刷新物理位置。
+
+## 8. 个人决策与提醒
+
+启用 SONAR_DECISION_ENABLED 后，合法候选邀请先由后台 Bamboo 决策；notify 才进入 inbox。ignore/defer 保存于该候选，不反复推理；缺少 Key、超时、上游失败暂缓，不自动全部提醒。推理不在 HTTP 数据库事务内执行，结果返回后重检收件人、消息、request_id、配置版本、位置、意愿、静音和时效。
+
+已批准的 invitation.payload 增加 attention={action:"notify",provider:"bamboo",model:"startlux-decision-27b-autothink"}。GET inbox/{id} 的未批准候选 actionable=false，reason_code=ATTENTION_NOT_APPROVED；确认回答、alerted 回执、原问音频和 MCP queue_voice 同样不能绕过批准。prompted 仍保留自愿回应入口，只有 pending 自动提示。
+
+自己的问题与回答交付延续现有协议：回答不再做兴趣筛选，quiet 下保留待听。Android 通过“我的 → 我关心什么”更新 focus；静音与互助开关保留 focus。完整配置与复跑见[个人决策](../design/attention-decisions.md)。
+
+## 9. 三类声音兼容扩展
+
+2026-10-24 已新增 reply/scene/knowledge/announcement 草稿、地点浏览、频道授权、访问去重与独立收听设置；原 question/answer 字段及行为兼容。增量字段、HTTP 接口、期限和验收见[声音匹配实现协议](voice-matching.md)。私聊、实时对讲及后台唤醒未开放。

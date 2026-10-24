@@ -1,16 +1,18 @@
+import asyncio
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, File, Form, Header, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, Query, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import TypeAdapter, ValidationError
 
+from .attention_worker import AttentionWorker
 from .audio import MAX_AUDIO
 from .config import Settings
 from .errors import Problem
-from .models import Ack, Context, Draft, Empty
+from .models import Ack, Context, Draft, Empty, Listening, LocationUpdate, VoiceQueue
 from .service import Service
 
 
@@ -49,7 +51,19 @@ def create_app(settings: Settings | None = None, clock=time.time):
 
     @asynccontextmanager
     async def lifespan(app):
-        yield
+        task = (
+            asyncio.create_task(AttentionWorker(service).run())
+            if settings.decision_enabled
+            else None
+        )
+        app.state.attention_task = task
+        try:
+            yield
+        finally:
+            if task:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
 
     app = FastAPI(title="Sonar", version="0.1.0", lifespan=lifespan)
     app.state.service = service
@@ -93,6 +107,42 @@ def create_app(settings: Settings | None = None, clock=time.time):
     def context(data: Context, db=DB, uid=USER):
         return service.context(db, uid, data)
 
+    # Authenticate without holding the SQLite writer lock across provider network calls.
+    def location_user(authorization: Annotated[str | None, Header()] = None):
+        db = service.store.connect()
+        try:
+            return service.auth(db, authorization)
+        finally:
+            db.close()
+
+    LOCATION_USER = Depends(location_user)
+
+    @app.put("/v1/me/location")
+    def location(data: LocationUpdate, uid=LOCATION_USER):
+        if data.location:
+            service.check_fix(data.location)
+        resolved = service.geo.resolve(data.location) if data.location else None
+        with service.scope() as db:
+            return service.update_location(db, uid, data, resolved)
+
+    @app.get("/v1/places")
+    def places(query: str = Query(min_length=2, max_length=100), uid=LOCATION_USER):
+        results = service.geo.search(query)
+        with service.scope() as db:
+            for p in results:
+                db.execute(
+                    "INSERT INTO places VALUES (?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET label=excluded.label",
+                    (
+                        p["id"],
+                        p["label"],
+                        p["latitude"],
+                        p["longitude"],
+                        p["kind"],
+                        service.clock(),
+                    ),
+                )
+        return {"places": results, **service.now()}
+
     @app.post("/v1/posts/drafts")
     async def draft(
         audio: Annotated[UploadFile, File()],
@@ -131,6 +181,28 @@ def create_app(settings: Settings | None = None, clock=time.time):
     @app.post("/v1/inbox/{did}/ack")
     def ack(did: str, data: Ack, db=DB, uid=USER):
         return service.ack(db, uid, did, data.event, data.request_id)
+
+    @app.put("/v1/me/listening")
+    def listening(data: Listening, db=DB, uid=USER):
+        return service.set_listening(db, uid, data)
+
+    @app.get("/v1/voices")
+    def voices(place_id: str = Query(min_length=1, max_length=100), db=DB, uid=USER):
+        return service.catalog(db, uid, place_id)
+
+    @app.post("/v1/voices/{pid}/queue")
+    def queue_place_voice(pid: str, data: VoiceQueue, db=DB, uid=USER):
+        return service.queue_place_voice(
+            db, uid, pid, str(data.client_request_id) if data.client_request_id else None
+        )
+
+    @app.post("/v1/voices/{pid}/withdraw")
+    def withdraw_voice(pid: str, data: Empty, db=DB, uid=USER):
+        return service.withdraw_voice(db, uid, pid)
+
+    @app.get("/v1/conversations/{qid}")
+    def conversation(qid: str, db=DB, uid=USER):
+        return service.conversation(db, uid, qid)
 
     @app.get("/v1/audio/{pid}")
     def audio(pid: str, db=DB, uid=USER):

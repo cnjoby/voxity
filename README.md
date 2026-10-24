@@ -4,7 +4,7 @@
 
 人发起问答，广场保存并组织声音，个人 Agent 按主人的意愿筛选、安排播放并追踪回复。
 
-两天黑客松原型：Android 提问，处在模拟路口且愿意互助的参与者收到邀请，自愿回答后提问者听到原声。自有业务服务单机部署，语音交互计划接入 Linx；ESP32 由硬件成员实现。
+两天黑客松原型：Android 定位并提问，处在目标附近且愿意互助的参与者收到邀请，自愿回答后提问者听到原声。自有业务服务单机部署，语音交互计划接入 Linx；ESP32 由硬件成员实现。
 
 ## 工程入口
 
@@ -16,7 +16,7 @@
 | [docs/design](docs/design/README.md) | 产品定义、架构与评审 |
 | [开发计划](two-day-development.md) | 三端分工、接口契约与验收 |
 
-服务端已完成本地业务闭环；Android 已通过模拟器对真实 API 的提问、等待与播放检查。模拟器联调使用手动调试转写和明确标注的合成回复。真实 Linx、手机录放、ESP32 和公网部署仍待验收，详见[服务端交接](server/HANDOFF.md)及[Android 交接](android/HANDOFF.md)。
+服务端已完成本地业务闭环；Android 已通过前台定位、真实高德 POI、附近邀请与双用户录音问答的模拟器闭环。定位为显式注入坐标，双方录音由模拟器 AudioRecord 产生，转写和确认由测试输入。另已完成真机 Linx 接入，用户确认私人语音收到对话回复；完整真人公开问答、ESP32 和公网部署仍待验收，详见[服务端交接](server/HANDOFF.md)及[Android 交接](android/HANDOFF.md)。
 
 ## 启动服务端
 
@@ -43,3 +43,11 @@ uv run pytest -q
 ```
 
 两端与设备的验证步骤见[联调验收](docs/development/integration.md)。运行数据、凭证、APK、构建缓存和路演生成文件保存在本地，不进入源码提交。
+
+真实位置接入见[定位协议](docs/development/location.md)。Bamboo/StartLux 原生决策已接入实际邀请筛选与提醒，本机已开启，规则检查与人工确认保留，见[个人声音决策](docs/design/attention-decisions.md)。
+
+三类声音扩展已加入服务端与 Android 前台：情境分享、POI 授权运营公告、公开多轮定向回复及独立收听设置。新增协议、运营授权命令、验证结果与模拟器复跑见[声音匹配实现与验收](docs/development/voice-matching.md)。
+
+Android 真机已绑定灵矽，真实 PCM STT/TTS 自动检查通过，用户确认“试说一句”收到对话回复；另一次真人自动检查超时，业务 MCP 仍待联调，见[手机接入记录](docs/development/linx-android.md)。
+
+张江三个地点的 36 条合成测试音频已内置 Android，可在首页切换模拟地点、离线试听或请求手机真实位置。详情见[测试音频与位置切换](docs/development/demo-audio.md)。

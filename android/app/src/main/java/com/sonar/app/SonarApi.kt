@@ -25,6 +25,20 @@ interface SonarApi {
 
     suspend fun context(data: JSONObject): JSONObject
 
+    suspend fun location(revision: Int, fix: JSONObject?): JSONObject = error("此模式不支持定位")
+
+    suspend fun places(query: String): JSONObject = error("此模式不支持地点搜索")
+
+    suspend fun listening(data: JSONObject): JSONObject = error("此模式不支持收听设置")
+
+    suspend fun voices(placeId: String): JSONObject = json("items" to org.json.JSONArray())
+
+    suspend fun queueVoice(postId: String): JSONObject = error("此模式不支持地点声音")
+
+    suspend fun withdrawVoice(postId: String): JSONObject = error("此模式不支持撤回")
+
+    suspend fun conversation(qid: String): JSONObject = json("items" to org.json.JSONArray())
+
     suspend fun upload(draft: LocalDraft): JSONObject
 
     suspend fun confirm(postId: String): JSONObject
@@ -124,6 +138,28 @@ class HttpSonarApi(
     override suspend fun me() = call("/v1/me")
 
     override suspend fun context(data: JSONObject) = call("/v1/me/context", data, "PUT")
+
+    override suspend fun location(revision: Int, fix: JSONObject?) =
+        call("/v1/me/location", json("expected_revision" to revision, "location" to fix), "PUT")
+
+    override suspend fun places(query: String) =
+        call("/v1/places?query=" + java.net.URLEncoder.encode(query, "UTF-8"))
+
+    override suspend fun listening(data: JSONObject) = call("/v1/me/listening", data, "PUT")
+
+    override suspend fun voices(placeId: String) =
+        call("/v1/voices?place_id=" + java.net.URLEncoder.encode(placeId, "UTF-8"))
+
+    override suspend fun queueVoice(postId: String) =
+        call(
+            "/v1/voices/$postId/queue",
+            json("client_request_id" to java.util.UUID.randomUUID().toString()),
+        )
+
+    override suspend fun withdrawVoice(postId: String) =
+        call("/v1/voices/$postId/withdraw", JSONObject())
+
+    override suspend fun conversation(qid: String) = call("/v1/conversations/$qid")
 
     override suspend fun upload(draft: LocalDraft): JSONObject =
         withContext(Dispatchers.IO) {

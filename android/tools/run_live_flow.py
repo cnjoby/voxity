@@ -16,7 +16,7 @@ def main():
     adb=['adb','-s',args.serial]
     for path in ('app/build/outputs/apk/debug/app-debug.apk','app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk'):
         subprocess.run(adb+['install','-r',str(root/path)],check=True)
-    subprocess.run([sys.executable,str(root/'tools/configure_device.py'),'--serial',args.serial,'--base-url',args.base_url,'--debug-transcript'],check=True)
+    subprocess.run([sys.executable,str(root/'tools/configure_device.py'),'--serial',args.serial,'--base-url',args.base_url,'--debug-transcript','--simulated-location'],check=True)
     subprocess.run(adb+['shell','pm','grant','com.sonar.app','android.permission.RECORD_AUDIO'],check=True)
     peer=subprocess.Popen([sys.executable,str(root/'tools/respond_once.py'),'--base-url',args.base_url,'--synthetic','--wait','120'],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
     try:

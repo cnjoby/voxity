@@ -22,7 +22,8 @@ suspend fun sendStoredAck(api: SonarApi, ack: JSONObject) {
                 if (
                     current.type == "audio" &&
                         current.state == "pending" &&
-                        current.payload.text("post_id") == ack.getString("post_id")
+                        current.payload.text("post_id") == ack.getString("post_id") &&
+                        current.payload.text("visit_id") == ack.text("visit_id")
                 ) {
                     api.ack(id, current.requestId, event)
                 }

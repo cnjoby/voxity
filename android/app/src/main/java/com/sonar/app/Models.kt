@@ -22,6 +22,7 @@ data class Profile(
     val assist: Boolean,
     val focus: String,
     val presence: JSONObject,
+    val listening: JSONObject = JSONObject(),
 ) {
     companion object {
         fun parse(j: JSONObject) =
@@ -32,6 +33,7 @@ data class Profile(
                 j.getBoolean("assist_enabled"),
                 j.getString("focus"),
                 j.getJSONObject("presence"),
+                j.optJSONObject("listening") ?: JSONObject(),
             )
     }
 }
@@ -52,6 +54,7 @@ data class Question(
     val expiresAt: String,
     val answer: JSONObject?,
     val inviteOutcome: String,
+    val targetLabel: String? = null,
 ) {
     companion object {
         fun parse(j: JSONObject) =
@@ -61,6 +64,7 @@ data class Question(
                 j.getString("expires_at"),
                 j.optJSONObject("answer"),
                 j.text("invite_outcome", "none"),
+                j.optJSONObject("target_place")?.text("label"),
             )
     }
 }
@@ -77,7 +81,9 @@ data class Delivery(
     val payload: JSONObject,
 ) {
     val key
-        get() = "$id:$requestId"
+        get() =
+            payload.text("visit_id").takeIf { it.isNotBlank() }?.let { "$id:visit:$it" }
+                ?: "$id:$requestId"
 
     companion object {
         fun parse(j: JSONObject) =
@@ -109,6 +115,9 @@ class ServerClock(private val elapsed: () -> Long) {
     @Synchronized
     fun remaining(timestamp: String): Long =
         epoch?.let { Instant.parse(timestamp).toEpochMilli() - (it + elapsed() - origin) } ?: -1L
+
+    @Synchronized
+    fun now(): Instant = Instant.ofEpochMilli((epoch ?: error("请先连接服务")) + elapsed() - origin)
 
     fun valid(d: Delivery) = d.actionable && d.state == "pending" && remaining(d.expiresAt) > 0
 }
@@ -149,6 +158,12 @@ data class LocalDraft(
     val invitationId: String? = null,
     val postId: String? = null,
     val frozen: Boolean = false,
+    val targetPlaceId: String = "zhonghuan_jinke",
+    val targetLabel: String = "中环路金科路口",
+    val recordedLocation: String? = null,
+    val voiceMetadata: String? = null,
+    val replyQuote: String? = null,
+    val replyRecipient: String? = null,
 ) {
     fun metadata() =
         json(
@@ -158,12 +173,22 @@ data class LocalDraft(
             )
             .apply {
                 if (replyTo == null) {
-                    put("target_place_id", "zhonghuan_jinke")
-                    put("direction", "demo_exit")
+                    put("target_place_id", targetPlaceId)
+                    put(
+                        "direction",
+                        if (targetPlaceId == "zhonghuan_jinke") "demo_exit" else "unknown",
+                    )
                 } else {
                     put("reply_to", replyTo)
                     put("invitation_id", invitationId)
                 }
+                voiceMetadata?.let { extra ->
+                    val fields = JSONObject(extra)
+                    fields.keys().forEach { key -> put(key, fields.get(key)) }
+                    remove("direction")
+                    if (fields.text("kind") == "reply") remove("invitation_id")
+                }
+                recordedLocation?.let { put("recorded_location", JSONObject(it)) }
             }
 
     fun toJson() =
@@ -176,6 +201,12 @@ data class LocalDraft(
             "invitationId" to invitationId,
             "postId" to postId,
             "frozen" to frozen,
+            "targetPlaceId" to targetPlaceId,
+            "targetLabel" to targetLabel,
+            "recordedLocation" to recordedLocation,
+            "voiceMetadata" to voiceMetadata,
+            "replyQuote" to replyQuote,
+            "replyRecipient" to replyRecipient,
         )
 
     companion object {
@@ -189,6 +220,18 @@ data class LocalDraft(
                 j.text("invitationId").ifBlank { null },
                 j.text("postId").ifBlank { null },
                 j.optBoolean("frozen"),
+                j.text("targetPlaceId", "zhonghuan_jinke"),
+                j.text("targetLabel", "中环路金科路口"),
+                j.text("recordedLocation").ifBlank { null },
+                j.text("voiceMetadata").ifBlank { null },
+                j.text("replyQuote").ifBlank { null },
+                j.text("replyRecipient").ifBlank { null },
             )
+    }
+}
+
+data class PlaceChoice(val id: String, val label: String) {
+    companion object {
+        fun parse(j: JSONObject) = PlaceChoice(j.getString("id"), j.getString("label"))
     }
 }

@@ -12,6 +12,7 @@ def main():
     parser.add_argument('--base-url',default='http://127.0.0.1:8765')
     parser.add_argument('--debug-transcript',action='store_true')
     parser.add_argument('--mock',action='store_true')
+    parser.add_argument('--simulated-location',action='store_true')
     args=parser.parse_args()
     root=Path(__file__).resolve().parents[2]
     token=os.environ.get('SONAR_ALICE_TOKEN','')
@@ -24,7 +25,7 @@ def main():
     adb=['adb','-s',args.serial]
     subprocess.run(adb+['shell','am','force-stop','com.sonar.app'],check=True,stdout=subprocess.DEVNULL)
     subprocess.run(adb+['shell','run-as','com.sonar.app','mkdir','-p','files'],check=True)
-    config={'base_url':args.base_url,'token':token,'mock':args.mock,'debug_transcript':args.debug_transcript}
+    config={'base_url':args.base_url,'token':token,'mock':args.mock,'debug_transcript':args.debug_transcript,'simulated_location':args.simulated_location}
     subprocess.run(adb+['shell',"run-as com.sonar.app sh -c 'umask 077; cat > files/bootstrap.json'"],input=json.dumps(config).encode(),check=True)
     subprocess.run(adb+['reverse','tcp:8765','tcp:8765'],check=True,stdout=subprocess.DEVNULL)
     subprocess.run(adb+['shell','am','start','-n','com.sonar.app/.MainActivity'],check=True,stdout=subprocess.DEVNULL)
