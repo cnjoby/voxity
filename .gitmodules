@@ -1,0 +1,4 @@
+[submodule "firmware/esp32"]
+	path = firmware/esp32
+	url = https://github.com/ma6174/ai-passport.git
+	branch = feature/sonar-voice-client

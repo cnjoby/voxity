@@ -2,7 +2,7 @@
 
 2026-10-26补充：生产为`20261026-conversation-first-025`，Android仍为0.2.3。有效question邀请不再等待相关性模型批准：以`actionable`、真实request_id和有效期为准，`payload.attention.action=notify`；新增`model_action`／`model_reason`仅为标记、`blocking=false`，不要因模型ignore、defer或尚未返回而自行拦截。有效会话收听新问题不再受十分钟冷却。核心question／answer路径和WAV编码保持不变；连续真人闲聊仍需第7节的双方会话接入。[完整变更与验证](conversation-first-20261026.md)。
 
-更新：2026-10-25，针对真实 Android 0.2.3 与当前生产服务核对。当前入口：`http://122.195.131.106`（联调HTTP）或 `https://122.195.131.106`。这是当前指南；旧v4文字已移至[历史快照](esp32-ai-handoff-v4-20261025-archive.md)，不得再按旧模拟ID、8秒限制和旧会话描述实现。ESP32工程、板卡资料及烧录环境由硬件同学提供，本仓库没有其固件源码。
+更新：2026-10-25，针对真实 Android 0.2.3 与当前生产服务核对。当前入口：`http://122.195.131.106`（联调HTTP）或 `https://122.195.131.106`。这是当前指南；旧v4文字已移至[历史快照](esp32-ai-handoff-v4-20261025-archive.md)，不得再按旧模拟ID、8秒限制和旧会话描述实现。ESP32工程、板卡资料及烧录环境由硬件同学维护；2026-10-26 已通过 `firmware/esp32` 子模块固定引用原私有仓库的 Sonar 分支，获取与构建方法见[固件入口](../../firmware/README.md)。本次只纳入源码引用，未重新验证固件或烧录设备。
 
 ## 先修复当前“answered, waiting voice”
 
@@ -178,6 +178,6 @@ question_answered -> audio_metadata_parsed -> audio_http_200
 
 配对状态的语音轮次可返回status=chatting／action=human_chat或chat_message；收件仍通过 `/v1/exchange/sessions/{sid}/inbox`，交付为type=audio，但payload.kind为chat，音频URL为 `/v1/chat/audio/{message_id}`。必须使用返回的audio_url，不硬编码所有声音都在 `/v1/audio/`。回执仍使用服务器返回的delivery ID和request_id；chat delivery ID前缀chatd不应被固件丢弃或替换成question ID。结束／安静、时效、对方退出与重复播放规则仍需执行。
 
-若固件只轮询 `/v1/questions/{qid}` 等answered，或只接受payload.kind=answer，就没有接入持续聊天。请提供ESP32工程路径／仓库和对应revision，核对其上传入口、inbox解析、支持的kind、chat音频URL及播放器状态机。本仓库目前没有固件源代码，不能宣称这部分已修改或烧录。
+若固件只轮询 `/v1/questions/{qid}` 等answered，或只接受payload.kind=answer，就没有接入持续聊天。现可从[固件子模块](../../firmware/README.md)取得固定 revision，核对其上传入口、inbox解析、支持的kind、chat音频URL及播放器状态机；本次未修改或烧录固件，不能把源码存在视为持续聊天已验收。
 
 原问答播放与持续聊天应分别验收。普通私人话语不会因两端在线就自动广播；对话关系和双向意愿应由同一会话及语义决策处理，不用把所有说话强制发到广场。

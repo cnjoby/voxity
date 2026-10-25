@@ -12,11 +12,12 @@
 | --- | --- |
 | 下载、依赖、启动、构建、安装与使用 | [完整运行指南](docs/RUNNING.md) |
 | 当前实现、模块规格、接口、状态所有权与角色分工 | [架构与模块规格](docs/design/module-specs.md) |
+| 同事维护的 ESP32 固件、固定版本及获取/更新方法 | [固件入口](firmware/README.md) |
 | 产品定义、六要素消息、业务线与下一阶段设计 | [产品架构](docs/design/product-architecture.md) |
 | 最新现有 PPT、讲述备注、内嵌/独立原理动画 | [路演材料](docs/presentations/README.md) |
 | 本次上传范围与验证证据 | [2026-10-26 交付记录](docs/delivery/github-20261026.md) |
 
-本仓库包含现有 Android、服务端、测试、脚本和部署配置。ESP32 固件由同事独立更新，本次不包含其源码；对接使用[当前固件接入规范](docs/development/esp32-ai-handoff.md)。灵矽、高德和 Bamboo 为外部服务，实际 Key、设备绑定及运行数据不随源码分发。
+本仓库包含现有 Android、服务端、测试、脚本和部署配置。ESP32 固件由同事独立维护，通过 `firmware/esp32` Git 子模块引用原私有仓库的 Sonar 分支，获取源码需要原仓库权限；[下载与更新方式](firmware/README.md)，对接使用[当前固件接入规范](docs/development/esp32-ai-handoff.md)。灵矽、高德和 Bamboo 为外部服务，实际 Key、设备绑定及运行数据不随源码分发。
 
 ## 快速启动服务端
 
@@ -54,6 +55,7 @@ uv run python verify_release.py --synthetic
 | --- | --- |
 | [server](server/README.md) | FastAPI、SQLite、原声、任务、模型/地图适配与 MCP |
 | [android](android/README.md) | Kotlin、Compose、语音运行、录放与私有配置 |
+| [firmware](firmware/README.md) | ESP32-C3 固件子模块、构建入口与版本协作 |
 | [scripts](scripts) | 合成素材生成及 HTTP/语音网络检查脚本 |
 | [deploy](deploy/README.md) | systemd、Caddy、Compose 备选及历史部署记录 |
 | [设计文档](docs/design/README.md) | 产品定义、交互、架构和审查 |

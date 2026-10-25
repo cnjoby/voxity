@@ -1,6 +1,6 @@
 # 声呐 Sonar｜运行与验证指南
 
-核对日期：2026-10-26。适用范围：本仓库 Android 0.2.3（versionCode 9）与当前服务端源码。ESP32 固件由同事独立维护，本次不包含其源码、构建或烧录环境。
+核对日期：2026-10-26。适用范围：本仓库 Android 0.2.3（versionCode 9）与当前服务端源码。ESP32 固件由同事独立维护，通过 `firmware/esp32` 子模块固定引用；需要原私有仓库权限及独立 ESP-IDF 环境，见[固件运行入口](../firmware/README.md)。
 
 ## 1. 下载与环境
 
@@ -8,6 +8,8 @@
 git clone https://github.com/cnjoby/voxity.git
 cd voxity
 ```
+
+上述普通克隆足够运行 Android 与服务端。有固件仓库权限时，再执行 `git submodule update --init --recursive firmware/esp32` 下载固定版本的硬件源码；新下载完整项目也可使用 `git clone --recurse-submodules`。Download ZIP 不包含子模块源码。
 
 | 部分 | 需要准备 | 依赖入口 |
 | --- | --- | --- |
