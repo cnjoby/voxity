@@ -44,7 +44,7 @@ object Wav {
     fun synthetic(): ByteArray = header(3200) + ByteArray(3200)
 }
 
-class AudioCoordinator(context: Context) {
+class AudioCoordinator(context: Context, private val onFocusLost: () -> Unit = {}) {
     private val manager = context.getSystemService(AudioManager::class.java)
     val gate = AudioGate()
     @Volatile private var recording = false
@@ -142,7 +142,10 @@ class AudioCoordinator(context: Context) {
                         AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
                             .setAudioAttributes(attributes)
                             .setOnAudioFocusChangeListener { change ->
-                                if (change < 0 && continuation.isActive) continuation.cancel()
+                                if (change < 0 && continuation.isActive) {
+                                    onFocusLost()
+                                    continuation.cancel()
+                                }
                             }
                             .build()
                     focus = request

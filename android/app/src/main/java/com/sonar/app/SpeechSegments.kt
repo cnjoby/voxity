@@ -39,7 +39,7 @@ class SpeechSegments(
             if (leading >= 4) {
                 speaking = true
                 onStart() // Stop playback locally, before any ASR/network result.
-                samples = ByteArrayOutputStream(256000)
+                samples = ByteArrayOutputStream(960000)
                 preRoll.forEach { samples.write(it) }
                 preRoll.clear()
                 voiced = leading
@@ -48,12 +48,12 @@ class SpeechSegments(
             }
             return
         }
-        if (samples.size() < 256000) samples.write(frame)
+        if (samples.size() < 960000) samples.write(frame)
         else truncated = true
         if (speech) { voiced++; quiet = 0 } else quiet++
-        if (quiet >= tailFrames || samples.size() >= 256000) {
+        if (quiet >= tailFrames || samples.size() >= 960000) {
             val pcm = samples.toByteArray()
-            val cut = truncated || samples.size() >= 256000
+            val cut = truncated || samples.size() >= 960000
             val enoughSpeech = voiced >= 8
             reset()
             waitForSilence = cut
@@ -89,10 +89,11 @@ internal fun localExchangeCommand(text: String): String? {
     val value = text.replace(Regex("[\\s，。！？,.!?]"), "")
     return when (value) {
         "安静", "安静一下", "别说了", "先别说了", "暂停交流" -> "quiet"
-        "恢复交流", "恢复收听", "继续交流" -> "resume"
-        "停一下", "停止播放", "暂停播放", "稍后听" -> "stop"
-        "刚才那句别发", "先别发", "不要发出去" -> "undo"
-        "关闭麦克风", "结束交流", "结束免提" -> "end"
+        "继续", "恢复", "恢复交流", "恢复收听", "继续交流" -> "resume"
+        "停", "停一下", "停止播放", "暂停播放", "稍后听" -> "stop"
+        "刚才那句别发", "先别发", "不要发出去", "撤回刚才那句", "撤回刚才的分享" -> "undo"
+        "不用等了", "别等了", "取消刚才的问题" -> "cancel"
+        "结束", "退出", "先到这里", "关闭麦克风", "结束交流", "结束免提" -> "end"
         else -> null
     }
 }

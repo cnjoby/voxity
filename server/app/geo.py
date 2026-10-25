@@ -6,7 +6,6 @@ from datetime import UTC
 import httpx
 
 from .errors import Problem
-from .storage import digest
 
 
 def distance_m(lat1, lon1, lat2, lon2):
@@ -91,7 +90,7 @@ class AMap:
                     continue
                 choices.append(
                     {
-                        "id": "amap:" + digest(str(poi["id"]))[:24],
+                        "id": str(poi["id"]),
                         "label": str(poi["name"])[:160],
                         "latitude": y,
                         "longitude": x,
@@ -112,7 +111,7 @@ class AMap:
                     continue
                 results.append(
                     {
-                        "id": "amap:" + digest(str(poi["id"]))[:24],
+                        "id": str(poi["id"]),
                         "label": str(poi["name"])[:160],
                         "latitude": lat,
                         "longitude": lon,
@@ -122,3 +121,93 @@ class AMap:
             except (KeyError, TypeError, ValueError):
                 continue
         return results
+
+    def weather(self, place):
+        """District observations are not a rain sensor at this exact POI."""
+        try:
+            geo = self.get(
+                "geocode/regeo",
+                location=f"{place['longitude']:.6f},{place['latitude']:.6f}",
+                extensions="base",
+            )["regeocode"]["addressComponent"]
+            code = str(geo["adcode"])
+            if not code.isdigit() or len(code) != 6:
+                raise ValueError()
+            live = self.get("weather/weatherInfo", city=code, extensions="base")["lives"][0]
+            fields = {
+                key: str(live[key])[:80] for key in ("city", "weather", "temperature", "reporttime")
+            }
+            if any(not value for value in fields.values()):
+                raise ValueError()
+            return {**fields, "adcode": code, "scope": "district", "provider": "amap"}
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            raise Problem(503, "WEATHER_UNAVAILABLE", "暂时没有可用的区县天气数据", True) from exc
+
+    def forecast(self, place, target_date):
+        """Match an actual forecast date, never substitute a current observation."""
+        try:
+            geo = self.get(
+                "geocode/regeo",
+                location=f"{place['longitude']:.6f},{place['latitude']:.6f}",
+                extensions="base",
+            )["regeocode"]["addressComponent"]
+            code = str(geo["adcode"])
+            if not code.isdigit() or len(code) != 6:
+                raise ValueError()
+            result = self.get("weather/weatherInfo", city=code, extensions="all")["forecasts"][0]
+            day = next((d for d in result["casts"] if d["date"] == target_date), None)
+            if not day:
+                raise ValueError()
+            fields = {
+                k: str(day[k])[:80]
+                for k in ("date", "dayweather", "nightweather", "daytemp", "nighttemp")
+            }
+            if any(not v for v in fields.values()) or any(
+                not -90 <= float(fields[k]) <= 70 for k in ("daytemp", "nighttemp")
+            ):
+                raise ValueError()
+            return {
+                **fields,
+                "city": str(result["city"])[:80],
+                "reporttime": str(result["reporttime"])[:80],
+                "adcode": code,
+                "scope": "district",
+                "provider": "amap",
+                "weather_type": "forecast",
+            }
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            raise Problem(
+                503, "FORECAST_UNAVAILABLE", "暂时没有这一天的有效天气预报", True
+            ) from exc
+
+    def driving(self, origin, place):
+        try:
+            path = self.get(
+                "direction/driving",
+                origin=f"{origin[1]:.6f},{origin[0]:.6f}",
+                destination=f"{place['longitude']:.6f},{place['latitude']:.6f}",
+                extensions="all",
+                strategy=0,
+            )["route"]["paths"][0]
+            duration, distance = int(path["duration"]), int(path["distance"])
+            if duration <= 0 or distance <= 0:
+                raise ValueError()
+            congestion = {}
+            for step in path.get("steps", []):
+                for tmc in step.get("tmcs", []):
+                    status = tmc.get("status")
+                    if status not in ("畅通", "缓行", "拥堵", "严重拥堵", "未知"):
+                        status = "未知"
+                    length = int(tmc["distance"])
+                    if length < 0:
+                        raise ValueError()
+                    congestion[status] = congestion.get(status, 0) + length
+            return {
+                "duration_seconds": duration,
+                "distance_m": distance,
+                "traffic_m": congestion,
+                "provider": "amap",
+                "scope": "driving_route",
+            }
+        except (KeyError, IndexError, TypeError, ValueError, OverflowError) as exc:
+            raise Problem(503, "ROUTE_UNAVAILABLE", "暂时没有可用的驾车路线数据", True) from exc

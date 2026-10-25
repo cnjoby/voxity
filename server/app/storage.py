@@ -1,6 +1,7 @@
+import asyncio
 import hashlib
 import sqlite3
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 
 
@@ -20,6 +21,10 @@ class Database:
             db.executescript(Path(__file__).with_name("schema.sql").read_text())
             # Additive migration preserves existing users, drafts and delivery history.
             for table, columns in {
+                "exchange_sessions": {
+                    "network_enabled": "INTEGER NOT NULL DEFAULT 0",
+                    "capabilities_json": "TEXT",
+                },
                 "profiles": {
                     "location_json": "TEXT",
                     "latitude": "REAL",
@@ -67,3 +72,33 @@ class Database:
             raise
         finally:
             db.close()
+
+    @asynccontextmanager
+    async def async_transaction(self):
+        # A synchronous SQLite busy wait on the ASGI loop can prevent another
+        # request's dependency cleanup from committing the writer we wait for.
+        scope = self.transaction()
+        opening = asyncio.create_task(asyncio.to_thread(scope.__enter__))
+        try:
+            db = await asyncio.shield(opening)
+        except asyncio.CancelledError:
+            # __enter__ may still acquire the lock after the request is cancelled.
+            # Drain it and close its transaction instead of leaking a writer.
+            try:
+                await opening
+            except Exception:
+                pass
+            else:
+                await asyncio.to_thread(
+                    scope.__exit__, asyncio.CancelledError, asyncio.CancelledError(), None
+                )
+            raise
+        try:
+            yield db
+        except BaseException as exc:
+            await asyncio.shield(
+                asyncio.to_thread(scope.__exit__, type(exc), exc, exc.__traceback__)
+            )
+            raise
+        else:
+            await asyncio.shield(asyncio.to_thread(scope.__exit__, None, None, None))

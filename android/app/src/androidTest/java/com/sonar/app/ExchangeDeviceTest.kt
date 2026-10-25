@@ -32,6 +32,10 @@ class ExchangeDeviceTest {
     private val offer = AtomicBoolean(false)
     private val downloads = AtomicInteger()
     private val publishes = AtomicInteger()
+    private val playedAcks = AtomicInteger()
+    @Volatile private var pendingLedger = false
+    @Volatile private var missingTasks = false
+    @Volatile private var offlineControl = false
     private val sawDeferredExclusion = AtomicBoolean(false)
     private val blockInbox = AtomicBoolean(false)
     private val inboxStarted = java.util.concurrent.CountDownLatch(1)
@@ -40,14 +44,22 @@ class ExchangeDeviceTest {
     @Volatile private var sessionState = "active"
     @Volatile private var revision = 1
     @Volatile private var mode = "listen"
+    @Volatile private var startRequest: JSONObject? = null
+    private val validSource = AtomicBoolean(false)
+    private val expireDuringDownload = AtomicBoolean(false)
+    @Volatile private var showLedger = false
+    @Volatile private var ledgerStatus = "responded"
+    @Volatile private var ledgerCommand: JSONObject? = null
     private lateinit var scope: String
     private val saved = mutableMapOf<String, Map<String, *>>()
     private val context get() = InstrumentationRegistry.getInstrumentation().targetContext
     private fun wrap(data: JSONObject) = MockResponse().setBody(data.put("server_time", Instant.now()).toString())
     private fun profile() = json("user_id" to "isolated", "revision" to 1, "mode" to mode,
         "assist_enabled" to true, "focus" to "路况", "presence" to json("source" to "android", "place_id" to "road"))
-    private fun session() = json("id" to "isolated-session", "revision" to revision, "state" to sessionState,
-        "place_id" to "road", "auto_publish" to false, "auto_play" to true, "expires_at" to Instant.now().plusSeconds(600))
+    private fun session(): JSONObject = json("id" to "isolated-session", "revision" to revision,
+        "state" to sessionState, "place_id" to "road", "interaction_mode" to "voice_first", "remote" to false,
+        "auto_publish" to false, "auto_play" to true, "voice_policy" to json("continuous_share" to false),
+        "expires_at" to Instant.now().plusSeconds(600))
     private fun delivery() = json("id" to "original", "type" to "audio", "question_id" to "scene",
         "request_id" to "request-original", "profile_revision" to 1, "state" to "pending", "actionable" to true,
         "expires_at" to Instant.now().plusSeconds(600), "payload" to json("post_id" to "scene", "kind" to "scene",
@@ -69,7 +81,29 @@ class ExchangeDeviceTest {
                         }
                         path == "/v1/me/location" -> wrap(json("profile" to profile(), "places" to JSONArray()))
                         path == "/v1/inbox" -> wrap(json("items" to JSONArray()))
-                        path == "/v1/exchange/sessions" -> wrap(json("session" to session()))
+                        path == "/v1/tasks" -> if (missingTasks) MockResponse().setResponseCode(404) else wrap(json("items" to JSONArray(if (showLedger) listOf(
+                            json("id" to "ledger-test", "revision" to if (ledgerStatus == "resolved") 2 else 1,
+                                "status" to ledgerStatus, "original_text" to "停车场还有位吗？",
+                                "conversation_id" to "scene", "deliveries" to JSONArray(listOf(json("id" to "original", "state" to if (pendingLedger) "pending" else "played", "post_id" to "scene"))))
+                        ) else emptyList<JSONObject>())))
+                        path == "/v1/tasks/ledger-test/actions" -> {
+                            ledgerCommand = JSONObject(request.body.readUtf8())
+                            ledgerStatus = "resolved"
+                            wrap(json("id" to "ledger-test", "status" to ledgerStatus))
+                        }
+                        path.startsWith("/v1/requests/") -> wrap(json("request_id" to path.substringAfterLast('/'),
+                            "turn" to json("turn_id" to "recovered-turn", "status" to "published", "post_id" to "recovered-post", "action" to "question")))
+                        path == "/v1/information/validate" -> wrap(json("valid" to validSource.get(), "valid_message_ids" to JSONArray(if (validSource.get()) listOf("scene") else emptyList<String>())))
+                        path == "/v1/messages/scene" -> wrap(json("message" to json("schema_version" to "1", "message_id" to "scene", "kind" to "scene",
+                            "time" to json(), "place" to json(), "subject" to json(), "event" to json(),
+                            "body" to json("content_origin" to "human_original", "audio_ref" to "/v1/audio/scene", "transcript" to "隔离原声"),
+                            "state" to json("publication" to "published", "applicability" to "valid"), "visibility" to "public")))
+                        path == "/v1/conversations/scene" -> wrap(json("items" to JSONArray(), "can_reply" to false))
+                        path == "/v1/exchange/sessions" -> {
+                            startRequest = JSONObject(request.body.readUtf8())
+                            wrap(json("session" to session()))
+                        }
+                        path.endsWith("/isolated-session") && offlineControl -> MockResponse().setResponseCode(503)
                         path.endsWith("/isolated-session") && request.method == "PUT" -> {
                             sessionState = JSONObject(request.body.readUtf8()).getString("state"); revision++
                             wrap(json("session" to session()))
@@ -86,18 +120,23 @@ class ExchangeDeviceTest {
                         path == "/v1/inbox/original" -> wrap(json("delivery" to delivery()))
                         path == "/v1/audio/scene" -> {
                             downloads.incrementAndGet()
+                            if (expireDuringDownload.get()) validSource.set(false)
                             val pcm = ByteArray(16000 * 2 * 6) // Explicit synthetic silence, no human speech.
                             MockResponse().setHeader("Content-Type", "audio/wav").setBody(Buffer().write(Wav.header(pcm.size) + pcm))
                         }
                         path == "/v1/voices/previous-scene/withdraw" -> wrap(json("post_id" to "previous-scene", "status" to "withdrawn"))
-                        path.endsWith("/ack") -> wrap(json("delivery" to delivery()))
+                        path.endsWith("/ack") -> {
+                            if (JSONObject(request.body.readUtf8()).text("event") == "played") playedAcks.incrementAndGet()
+                            wrap(json("delivery" to delivery()))
+                        }
                         path.endsWith("/utterances") -> { publishes.incrementAndGet(); MockResponse().setResponseCode(500) }
                         else -> MockResponse().setResponseCode(404)
                     }
                 }
             }
             server.start()
-            val config = DeviceConfig(baseUrl = server.url("/").toString(), token = "isolated-device-test")
+            val config = DeviceConfig(baseUrl = server.url("/").toString(), token = "isolated-device-test",
+                linxToken = "isolated-stt-only", linxUrl = server.url("/unused-stt").toString().replaceFirst("http://", "ws://"))
             ConfigStore(context).save(config)
             scope = config.scope
         }
@@ -129,6 +168,120 @@ class ExchangeDeviceTest {
         compose.waitForIdle()
         val image = InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot()
         File(context.filesDir, "test-exchange-$name.png").outputStream().use { image.compress(Bitmap.CompressFormat.PNG, 100, it) }
+    }
+
+    @Test fun parkingTaskLedgerReconcilesUnknownResultWithoutResendingAndKeepsResolutionExplicit() {
+        showLedger = true
+        val id = java.util.UUID.randomUUID().toString()
+        val savedStore = TaskStore(context, scope)
+        savedStore.beginTurn(id, "lost-session", json("client_request_id" to id, "transcript" to "停车场还有位吗？"))
+        assertEquals(id, TaskStore(context, scope).pendingRequests().single().getString("request_id"))
+        val commandId = savedStore.taskActionId("ledger-test", 1, "resolve")
+        assertEquals(commandId, TaskStore(context, scope).taskActionId("ledger-test", 1, "resolve"))
+        val vm = androidx.lifecycle.ViewModelProvider(compose.activity)[SonarViewModel::class.java]
+        compose.waitUntil(10000) { vm.state.value.connected }
+        compose.runOnIdle { vm.refreshTasks() }
+        compose.waitUntil(10000) { vm.state.value.personalTasks.isNotEmpty() && savedStore.pendingRequests().isEmpty() }
+        compose.onNodeWithText("我的任务").assertDoesNotExist()
+        assertEquals("responded", vm.state.value.personalTasks.single().status)
+        compose.runOnIdle { vm.changeTask(vm.state.value.personalTasks.single(), "resolve") }
+        compose.waitUntil(10000) { vm.state.value.personalTasks.single().status == "resolved" }
+        assertEquals(commandId, ledgerCommand!!.getString("client_request_id"))
+        assertEquals("resolve", ledgerCommand!!.getString("action"))
+        assertTrue(requests.contains("GET /v1/requests/$id"))
+        assertFalse(requests.any { it.endsWith("/utterances") || it.endsWith("/drafts") })
+        screenshot("tasks-resolved")
+    }
+
+    @Test fun invalidatedInformationCannotStartSyntheticAgentPlayback() {
+        lateinit var service: ExchangeService
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            service = ExchangeService()
+            android.content.ContextWrapper::class.java.getDeclaredMethod("attachBaseContext", Context::class.java)
+                .apply { isAccessible = true }.invoke(service, context)
+            service.onCreate()
+            ExchangeService::class.java.getDeclaredField("api").apply { isAccessible = true }
+                .set(service, HttpSonarApi(server.url("/").toString(), "isolated-test", ServerClock { 0 }, true))
+            ExchangeRuntime.mutable.value = ExchangeState(owned = true)
+            ExchangeService::class.java.getDeclaredMethod("playSourcedAgent", String::class.java, Int::class.javaPrimitiveType,
+                ByteArray::class.java, List::class.java, String::class.java).apply { isAccessible = true }
+                .invoke(service, "已经撤回的停车公告", 0, Wav.synthetic(), listOf(json("post_id" to "withdrawn", "retrieval_purpose" to "parking")), null)
+        }
+        try {
+            compose.waitUntil(5000) { requests.contains("POST /v1/information/validate") }
+            Thread.sleep(200)
+            assertFalse(ExchangeRuntime.state.value.playing)
+            assertFalse(requests.any { it.endsWith("/ack") || it.endsWith("/context") })
+        } finally {
+            InstrumentationRegistry.getInstrumentation().runOnMainSync { service.onDestroy() }
+        }
+    }
+
+    @Test fun voiceFirstStartHasNoModeSelectionOrIndiscriminatePublicGrants() {
+        val vm = androidx.lifecycle.ViewModelProvider(compose.activity)[SonarViewModel::class.java]
+        compose.waitUntil(10000) { vm.state.value.connected }
+        compose.onNodeWithTag("voice-start").assertIsEnabled().performClick()
+        compose.waitUntil(30000) { ExchangeRuntime.state.value.phase == "ready" }
+        val request = startRequest!!
+        assertEquals("voice_first", request.getString("interaction_mode"))
+        assertFalse(request.has("capabilities") || request.has("auto_publish") || request.has("network_enabled"))
+        compose.onNodeWithTag("exchange-active").assertExists()
+        compose.onNodeWithTag("exchange-setup").assertDoesNotExist()
+        assertTrue(ExchangeRuntime.state.value.owned)
+        compose.onNodeWithTag("exchange-stop").performClick()
+        compose.waitUntil(10000) { !ExchangeRuntime.state.value.owned }
+        assertEquals(0, publishes.get())
+    }
+
+    @Test fun agentAudioHasOwnSourceYieldsToQuietAndNeverBindsHumanContext() {
+        lateinit var service: ExchangeService
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            service = ExchangeService()
+            android.content.ContextWrapper::class.java.getDeclaredMethod("attachBaseContext", Context::class.java)
+                .apply { isAccessible = true }.invoke(service, context)
+            service.onCreate()
+            ExchangeService::class.java.getDeclaredField("api").apply { isAccessible = true }
+                .set(service, HttpSonarApi(server.url("/").toString(), "isolated-test", ServerClock { 0 }, true))
+            ExchangeRuntime.mutable.value = ExchangeState(owned = true, place = "语音网络隔离测试")
+            val pcm = ByteArray(16000 * 2 * 6) // Synthetic output fixture; does not test TTS synthesis.
+            ExchangeService::class.java.getDeclaredMethod("playAgent", String::class.java, Int::class.javaPrimitiveType, ByteArray::class.java)
+                .apply { isAccessible = true }.invoke(service, "高德当前规划，预计25分钟。", 0, Wav.header(pcm.size) + pcm)
+        }
+        try {
+            compose.waitUntil(8000) { ExchangeRuntime.state.value.playing }
+            assertEquals("agent", ExchangeRuntime.state.value.speaker)
+            assertEquals("高德当前规划，预计25分钟。", ExchangeRuntime.state.value.responseText)
+            screenshot("agent-response")
+            InstrumentationRegistry.getInstrumentation().runOnMainSync {
+                ExchangeService::class.java.getDeclaredMethod("quiet").apply { isAccessible = true }.invoke(service)
+            }
+            compose.waitUntil(5000) { !ExchangeRuntime.state.value.playing && ExchangeRuntime.state.value.quiet }
+            assertFalse(requests.any { it.endsWith("/context") })
+            assertFalse(requests.any { it.endsWith("/ack") || it.endsWith("/utterances") })
+        } finally {
+            InstrumentationRegistry.getInstrumentation().runOnMainSync { service.onDestroy() }
+        }
+    }
+
+    @Test fun chineseAgentSpeechProducesItsOwnAudioWhenLanguageIsAvailable() {
+        val output = File(context.cacheDir, "agent-native-synthesis.wav")
+        val report = File(context.filesDir, "test-agent-synthesis.txt")
+        try {
+            try {
+                kotlinx.coroutines.runBlocking { AgentSpeech(context).synthesize("这是声呐的工具查询回应。", output) }
+            } catch (e: Exception) {
+                report.writeText("Chinese TTS unavailable: ${e.message}; speech synthesis acceptance skipped.")
+                org.junit.Assume.assumeNoException("The device needs an available Chinese TTS voice", e)
+            }
+            assertTrue(output.length() > 44)
+            val started = AtomicBoolean(false)
+            val audio = AudioCoordinator(context)
+            try {
+                kotlinx.coroutines.runBlocking { audio.play(output, AudioMode.PROMPT, ownSpeaker = true, onStarted = { started.set(true) }) }
+                assertTrue(started.get())
+            } finally { audio.close() }
+            report.writeText("Chinese TTS produced ${output.length()} bytes and MediaPlayer completed playback. No peer audio was synthesized.")
+        } finally { output.delete() }
     }
 
     @Test fun cloudCommandCanWithdrawPreviousSceneWhileItsRecognitionJobIsActive() {
@@ -174,13 +327,7 @@ class ExchangeDeviceTest {
         val vm = androidx.lifecycle.ViewModelProvider(compose.activity)[SonarViewModel::class.java]
         compose.waitUntil(10000) { vm.state.value.connected }
         compose.runOnIdle { vm.selectPlace(PlaceChoice("road", "金科路中环路口 · 隔离测试")) }
-        compose.onNodeWithTag("exchange-setup").performClick()
-        compose.onNodeWithTag("exchange-auto-publish").assertIsOff()
-        compose.onNodeWithTag("exchange-auto-play").assertIsOff()
-        compose.onNodeWithTag("exchange-start").assertIsNotEnabled()
-        screenshot("setup")
-        compose.onNodeWithTag("exchange-auto-play").performClick()
-        compose.onNodeWithTag("exchange-start").performClick()
+        compose.onNodeWithTag("voice-start").performClick()
         compose.waitUntil(10000) { ExchangeRuntime.state.value.phase == "ready" }
         compose.onNodeWithTag("exchange-active").assertExists()
         compose.onNodeWithTag("record").assertDoesNotExist()
@@ -220,4 +367,177 @@ class ExchangeDeviceTest {
         assertEquals("Listen-only consent must not publish", 0, publishes.get())
         assertEquals(1, downloads.get())
     }
+    @Test fun preparationContainsNoTasksAssistSwitchOrFiveModes() {
+        val vm = androidx.lifecycle.ViewModelProvider(compose.activity)[SonarViewModel::class.java]
+        compose.waitUntil(10000) { vm.state.value.connected }
+        compose.onNodeWithTag("settings").performClick()
+        listOf("我的任务", "现场互助", "私人查询", "问问现场", "找车友聊聊", "只收听").forEach {
+            compose.onNodeWithText(it, useUnmergedTree = true).assertDoesNotExist()
+        }
+        compose.onNodeWithTag("developer-connection").performScrollTo().assertExists()
+        assertEquals(0, publishes.get())
+    }
+
+    @Test fun taskHistoryReplaysOnlyByExplicitActionAndKeepsPublicAndDeliveryStateUntouched() {
+        showLedger = true
+        validSource.set(true)
+        val vm = androidx.lifecycle.ViewModelProvider(compose.activity)[SonarViewModel::class.java]
+        compose.waitUntil(10000) { vm.state.value.connected && vm.state.value.personalTasks.isNotEmpty() }
+        assertEquals(0, downloads.get())
+        compose.runOnIdle { vm.hearTaskOriginal("scene") }
+        compose.waitUntil(10000) { downloads.get() == 1 }
+        compose.waitUntil(5000) { vm.state.value.taskNotice.startsWith("正在播放原声") }
+        compose.runOnIdle { vm.stopPlayback() }
+        compose.waitUntil(5000) { vm.state.value.playing == null }
+        Thread.sleep(300)
+        assertEquals("responded", ledgerStatus)
+        assertFalse(requests.any { it.endsWith("/ack") || it.endsWith("/utterances") || it.endsWith("/queue") })
+        assertTrue(requests.contains("GET /v1/messages/scene"))
+        assertTrue(requests.count { it == "POST /v1/information/validate" } >= 2)
+        screenshot("task-relisten")
+    }
+
+    @Test fun pendingOriginalManualListenAcksPlaybackWithoutResolvingTaskOrRepeatingIt() {
+        showLedger = true
+        pendingLedger = true
+        validSource.set(true)
+        val vm = androidx.lifecycle.ViewModelProvider(compose.activity)[SonarViewModel::class.java]
+        compose.waitUntil(10000) { vm.state.value.connected && vm.state.value.personalTasks.isNotEmpty() }
+        compose.runOnIdle { vm.hearTaskOriginal("scene", if (pendingLedger) "original" else null) }
+        compose.waitUntil(12000) { vm.state.value.taskNotice.startsWith("原声已听完") }
+        compose.waitUntil(5000) { playedAcks.get() > 0 }
+        assertEquals("responded", ledgerStatus)
+        assertEquals(1, downloads.get())
+        assertTrue(TaskStore(context, scope).attempted("original:request-original"))
+        assertFalse(requests.any { it.endsWith("/utterances") || it.endsWith("/queue") || it.endsWith("/actions") })
+    }
+
+    @Test fun anotherTaskCannotRetargetAnExistingPrivateDraft() {
+        val vm = androidx.lifecycle.ViewModelProvider(compose.activity)[SonarViewModel::class.java]
+        val file = File(context.cacheDir, "snr005-private-draft.wav").apply { writeBytes(Wav.synthetic()) }
+        try {
+            val draft = LocalDraft(java.util.UUID.randomUUID().toString(), file.absolutePath, targetPlaceId = "original-place", targetLabel = "原草稿地点")
+            TaskStore(context, scope).draft = draft
+            compose.runOnIdle { vm.configure(ConfigStore(context).load(), false) }
+            compose.waitUntil(5000) { vm.state.value.draft != null }
+            val task = PersonalTask.parse(json("id" to "other", "revision" to 1, "status" to "responded", "original_text" to "另一任务", "place_id" to "other-place"))
+            compose.runOnIdle { assertFalse(vm.prepareTaskQuery(task)) }
+            assertEquals("original-place", vm.state.value.draft!!.targetPlaceId)
+            assertEquals(draft.requestId, TaskStore(context, scope).draft!!.requestId)
+            assertEquals(0, publishes.get())
+        } finally { file.delete() }
+    }
+
+    @Test fun taskServiceFailureDoesNotCreateTaskOrManualFallbackMenus() {
+        missingTasks = true
+        val vm = androidx.lifecycle.ViewModelProvider(compose.activity)[SonarViewModel::class.java]
+        compose.waitUntil(10000) { vm.state.value.connected && !vm.state.value.taskServiceAvailable }
+        compose.onNodeWithTag("voice-start").assertExists()
+        compose.onNodeWithText("我的任务").assertDoesNotExist()
+        assertTrue(vm.state.value.connected)
+    }
+
+    @Test fun quietAndMicrophoneStopTakeEffectBeforeFailedNetworkControl() {
+        val vm = androidx.lifecycle.ViewModelProvider(compose.activity)[SonarViewModel::class.java]
+        compose.waitUntil(10000) { vm.state.value.connected }
+        compose.runOnIdle { vm.selectPlace(PlaceChoice("road", "断网控制隔离测试")); vm.startVoiceSession() }
+        compose.waitUntil(10000) { ExchangeRuntime.state.value.phase == "ready" }
+        offlineControl = true
+        compose.onNodeWithTag("exchange-quiet").performClick()
+        compose.waitUntil(1000) { ExchangeRuntime.state.value.quiet && !ExchangeRuntime.state.value.playing }
+        compose.onNodeWithTag("exchange-stop").performClick()
+        compose.waitUntil(5000) { !ExchangeRuntime.state.value.owned }
+        assertEquals(0, publishes.get())
+    }
+
+    @Test fun historyAudioFocusLossKeepsNormalClientQuietAfterOtherAudioEnds() {
+        showLedger = true
+        validSource.set(true)
+        val vm = androidx.lifecycle.ViewModelProvider(compose.activity)[SonarViewModel::class.java]
+        val manager = context.getSystemService(android.media.AudioManager::class.java)
+        val competitor = android.media.AudioFocusRequest.Builder(android.media.AudioManager.AUDIOFOCUS_GAIN)
+            .setOnAudioFocusChangeListener { }.build()
+        compose.waitUntil(10000) { vm.state.value.connected && vm.state.value.personalTasks.isNotEmpty() }
+        compose.runOnIdle { vm.hearTaskOriginal("scene", if (pendingLedger) "original" else null) }
+        compose.waitUntil(5000) { vm.state.value.taskNotice.startsWith("正在播放原声") }
+        try {
+            InstrumentationRegistry.getInstrumentation().runOnMainSync { manager.requestAudioFocus(competitor) }
+            compose.waitUntil(5000) { vm.state.value.quiet && vm.state.value.playing == null }
+            manager.abandonAudioFocusRequest(competitor)
+            Thread.sleep(1000)
+            assertTrue(vm.state.value.quiet)
+            assertEquals("responded", ledgerStatus)
+            assertEquals(0, playedAcks.get())
+        } finally { manager.abandonAudioFocusRequest(competitor) }
+    }
+
+    @Test fun taskContinuationUsesRealRootAndNeverCreatesAnotherPublicQuestion() {
+        showLedger = true
+        val vm = androidx.lifecycle.ViewModelProvider(compose.activity)[SonarViewModel::class.java]
+        compose.waitUntil(10000) { vm.state.value.connected && vm.state.value.personalTasks.isNotEmpty() }
+        compose.runOnIdle { vm.openConversation("scene") }
+        compose.waitUntil(5000) { vm.state.value.conversationId == "scene" }
+        compose.onNodeWithText("我的任务").assertDoesNotExist()
+        assertTrue(requests.contains("GET /v1/conversations/scene"))
+        assertFalse(requests.any { it.endsWith("/utterances") || it.endsWith("/drafts") })
+    }
+
+    @Test fun taskHistoryRejectsSourceInvalidatedDuringDownload() {
+        showLedger = true
+        validSource.set(true)
+        expireDuringDownload.set(true)
+        val vm = androidx.lifecycle.ViewModelProvider(compose.activity)[SonarViewModel::class.java]
+        compose.waitUntil(10000) { vm.state.value.connected && vm.state.value.personalTasks.isNotEmpty() }
+        compose.runOnIdle { vm.hearTaskOriginal("scene", if (pendingLedger) "original" else null) }
+        compose.waitUntil(10000) { vm.state.value.taskNotice.contains("失效") && vm.state.value.playing == null }
+        assertEquals(1, downloads.get())
+        assertFalse(requests.any { it.endsWith("/ack") || it.endsWith("/utterances") })
+    }
+
+    @Test fun activeViewShowsRealRemoteProvenanceWithoutTaskOrModeUI() {
+        compose.runOnIdle { ExchangeRuntime.mutable.value = ExchangeState(owned = true, phase = "agent_response", speaker = "agent",
+            playing = true, remote = true, place = "模力社区") }
+        try {
+            compose.onNodeWithText("声呐回应 · 合成语音").assertExists()
+            compose.onNodeWithText("远程地点 · 非手机实到").assertExists()
+            compose.onNodeWithText("我的任务").assertDoesNotExist()
+            compose.onNodeWithTag("exchange-setup").assertDoesNotExist()
+            screenshot("source-mirror")
+        } finally { compose.runOnIdle { ExchangeRuntime.mutable.value = ExchangeState() } }
+    }
+
+    @Test fun audioFocusLossStopsAgentAudioAndDoesNotResumeAutomatically() {
+        lateinit var service: ExchangeService
+        val manager = context.getSystemService(android.media.AudioManager::class.java)
+        val competitor = android.media.AudioFocusRequest.Builder(android.media.AudioManager.AUDIOFOCUS_GAIN)
+            .setOnAudioFocusChangeListener { }.build()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            service = ExchangeService()
+            android.content.ContextWrapper::class.java.getDeclaredMethod("attachBaseContext", Context::class.java)
+                .apply { isAccessible = true }.invoke(service, context)
+            service.onCreate()
+            ExchangeService::class.java.getDeclaredField("api").apply { isAccessible = true }
+                .set(service, HttpSonarApi(server.url("/").toString(), "isolated-test", ServerClock { 0 }, true))
+            ExchangeRuntime.mutable.value = ExchangeState(owned = true)
+            val pcm = ByteArray(16000 * 2 * 6)
+            ExchangeService::class.java.getDeclaredMethod("playAgent", String::class.java, Int::class.javaPrimitiveType, ByteArray::class.java)
+                .apply { isAccessible = true }.invoke(service, "隔离音频焦点测试", 0, Wav.header(pcm.size) + pcm)
+        }
+        try {
+            compose.waitUntil(8000) { ExchangeRuntime.state.value.playing }
+            InstrumentationRegistry.getInstrumentation().runOnMainSync {
+                assertEquals(android.media.AudioManager.AUDIOFOCUS_REQUEST_GRANTED, manager.requestAudioFocus(competitor))
+            }
+            compose.waitUntil(5000) { ExchangeRuntime.state.value.quiet && !ExchangeRuntime.state.value.playing }
+            manager.abandonAudioFocusRequest(competitor)
+            Thread.sleep(1000)
+            assertTrue("Regaining focus must not restore capture or playback authorization", ExchangeRuntime.state.value.quiet)
+            assertFalse(ExchangeRuntime.state.value.playing)
+            screenshot("focus-loss-quiet")
+        } finally {
+            manager.abandonAudioFocusRequest(competitor)
+            InstrumentationRegistry.getInstrumentation().runOnMainSync { service.onDestroy() }
+        }
+    }
+
 }

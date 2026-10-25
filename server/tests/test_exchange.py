@@ -30,9 +30,15 @@ class Decisions:
         return self.action
 
 
+class VoiceRoutes:
+    async def route(self, state):
+        return "reply" if state.get("heard_context") else "private_chat"
+
+
 def prepare(env):
     c, service, now, _ = env
     service.exchange_decider = Decisions()
+    service.voice_intent = VoiceRoutes()
     with service.scope() as db:
         db.execute(
             "INSERT INTO places VALUES (?,?,?,?,?,?)",
@@ -49,7 +55,7 @@ def prepare(env):
 
 def start(c, user="alice", **changes):
     profile = c.get("/v1/me", headers=auth(user)).json()["profile"]
-    return c.post(
+    response = c.post(
         "/v1/exchange/sessions",
         headers=auth(user),
         json={
@@ -61,6 +67,17 @@ def start(c, user="alice", **changes):
             **changes,
         },
     )
+    if response.status_code == 200:
+        # These lower-level publication/race fixtures explicitly stand for a user
+        # who has already granted continuous sharing. Default startup is tested separately.
+        service = c.app.state.service
+        with service.scope() as db:
+            sid = response.json()["session"]["id"]
+            session = service.exchange_row(db, user, sid)
+            policy = service.voice_policy(db, session)
+            policy["continuous_share"] = True
+            service.save_voice_policy(db, sid, policy)
+    return response
 
 
 def utter(c, session, now, user="alice", request_id=None, **changes):
@@ -164,7 +181,7 @@ def test_scope_time_model_uncertainty_and_no_relation_forgery(env):
         assert r.status_code == 200 and r.json()["status"] != "published", r.text
     with service.scope() as db:
         assert db.execute("SELECT COUNT(*) FROM posts").fetchone()[0] == 0
-    assert utter(c, a, now, recorded_at=stamp(now[0] - 61)).status_code == 410
+    assert utter(c, a, now, recorded_at=stamp(now[0] - 181)).status_code == 410
     with service.scope() as db:
         db.execute("UPDATE profiles SET sampled_at=? WHERE user_id='alice'", (now[0] - 100,))
     assert utter(c, a, now).status_code == 409
@@ -297,6 +314,11 @@ def test_natural_question_keeps_authentic_answer_relationship(env):
     service.exchange_decider.action = "question"
     q = utter(c, a, now, transcript="这路口现在还能走吗？").json()
     assert q["status"] == "published", q
+    c.put(
+        f"/v1/exchange/sessions/{b['id']}/context",
+        headers=auth("bob"),
+        json={"expected_session_revision": 1, "post_id": q["post_id"]},
+    )
     service.exchange_decider.action = "answer"
     result = utter(c, b, now, "bob", transcript="我就在下面，现在走不动。")
     assert result.status_code == 200 and result.json()["status"] == "published", result.text
@@ -394,12 +416,17 @@ def test_current_answer_root_accepts_followups_without_old_context(env):
     c, service, now = prepare(env)
     a, b = start(c).json()["session"], start(c, "bob").json()["session"]
     service.exchange_decider.action = "question"
-    question = utter(c, a, now).json()["post_id"]
+    question = utter(c, a, now, transcript="这路口现在还能走吗？").json()["post_id"]
     # The question is heard as original audio, never an invitation control voice.
     heard = c.get(f"/v1/exchange/sessions/{b['id']}/inbox", headers=auth("bob")).json()["items"]
     assert len(heard) == 1 and heard[0]["type"] == "audio"
     assert heard[0]["payload"]["kind"] == "question"
     assert c.get(heard[0]["payload"]["audio_url"], headers=auth("bob")).content == wav()
+    c.put(
+        f"/v1/exchange/sessions/{b['id']}/context",
+        headers=auth("bob"),
+        json={"expected_session_revision": 1, "post_id": question},
+    )
     service.exchange_decider.action = "answer"
     answer = utter(c, b, now, "bob").json()["post_id"]
     c.put(

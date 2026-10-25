@@ -1,0 +1,44 @@
+{
+  "poi_id": "B0K2KHYN77",
+  "poi_label": "模力社区",
+  "synthetic": true,
+  "source_note": "用户提供文案的合成模拟公共提示；非正式运营公告或真人现场发言。",
+  "model": "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-6bit",
+  "revision": "1c6c0ff58c43afa8df571facde2efa077efd85e2",
+  "speaker": "Serena",
+  "instruction": "像在园区前台自然提醒来访的朋友。亲切、放松、清楚的普通话，正常语速，语气平和。句子之间自然停顿，不用广播腔，不字字用力，不拖长，不表演。模力社区的模读模型的模。",
+  "processing": "resampling and volume normalization only; no speed changes or cuts",
+  "clips": [
+    {
+      "id": "welcome",
+      "label": "欢迎与入园须知",
+      "text": "欢迎来到模力社区。访客请到一楼前台登记。园区客户请刷脸进入。",
+      "file": "welcome.wav",
+      "automatic_arrival": true,
+      "duration_seconds": 5.84,
+      "sha256": "699251d80d6a8afbb4f8bf5b1abd83743d43f5ba8be5dcda1ab69f981db94df5",
+      "seed": 251025
+    },
+    {
+      "id": "visitor",
+      "label": "访客登记提示",
+      "text": "来访的朋友，请到模力社区一楼前台登记。",
+      "file": "visitor.wav",
+      "automatic_arrival": false,
+      "duration_seconds": 3.68,
+      "sha256": "f6a11d7890f714c78f9543812640e717cccce3df153fbf1d978667ccd71f1a37",
+      "seed": 251026
+    },
+    {
+      "id": "customer",
+      "label": "园区客户通行提示",
+      "text": "园区客户您好，请刷脸进入模力社区。",
+      "file": "customer.wav",
+      "automatic_arrival": false,
+      "duration_seconds": 3.04,
+      "sha256": "db8292e3004092411fdc3cb2c86a6c57c85b53a210ad727772c13628b9fe8ea5",
+      "seed": 251027
+    }
+  ],
+  "validity_policy": "until_withdrawn"
+}

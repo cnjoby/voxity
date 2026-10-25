@@ -8,5 +8,5 @@ __pycache__/
 .ruff_cache/
 .pytest_cache/
 
-# Generated presentation output and local deliverables
+# Private build output; selected presentation deliverables live in docs/presentations/
 /output/

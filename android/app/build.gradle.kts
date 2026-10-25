@@ -11,8 +11,8 @@ android {
         applicationId = "com.sonar.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.1.1"
+        versionCode = 9
+        versionName = "0.2.3"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     buildTypes { release { isMinifyEnabled = false } }
@@ -27,9 +27,19 @@ android {
     kotlinOptions { jvmTarget = "17" }
     testOptions { unitTests.isReturnDefaultValues = true }
     sourceSets["test"].resources.srcDir("../../docs/development/fixtures")
+    sourceSets["main"].assets.srcDir(layout.buildDirectory.dir("generated/voiceAssets"))
 }
 
+val prepareVoiceAssets by tasks.registering(Exec::class) {
+    commandLine("python3", rootProject.file("tools/prepare_voice_assets.py"))
+    inputs.file(rootProject.file("tools/prepare_voice_assets.py"))
+    outputs.file(layout.buildDirectory.file("generated/voiceAssets/offline/vosk-model-small-cn-0.22.zip"))
+}
+tasks.named("preBuild").configure { dependsOn(prepareVoiceAssets) }
+
 dependencies {
+    implementation("com.alphacephei:vosk-android:0.3.75@aar")
+    implementation("net.java.dev.jna:jna:5.18.1@aar")
     implementation(platform("androidx.compose:compose-bom:2025.04.01"))
     implementation("androidx.activity:activity-compose:1.10.1")
     implementation("androidx.compose.ui:ui")

@@ -39,6 +39,8 @@
 
 即时观察必须有开始/结束且时段不超过 `SONAR_OBSERVATION_MAX_TTL`（默认一小时）；公告不超过 `SONAR_ANNOUNCEMENT_MAX_TTL`（默认一天）。没有缺省长期动态公告。客户端发布表单目前选择立即生效、1～60 分钟；HTTP 支持未来生效。替代公告必须立即生效，不提前撤下仍有效的旧公告。草稿创建和确认时均检查权限、范围、版本与有效期，发布、替代和撤下队列在同一事务内完成。
 
+2026-10-25 增量：固定入园须知可由授权频道显式设置 `validity_policy=until_withdrawn`、`valid_until=null`，长期有效直到替代或撤回，必须提供生效时间和来源；即时观察和默认动态公告仍按上面的有限 TTL 校验。`content_origin=agent_synthesized` 保留合成来源。具体规则、已发布的模力社区提示及验证见[长期公共提示](modaily-entry-notices-20261025.md)。
+
 新增接口：
 
 | 接口 | 行为 |

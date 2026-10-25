@@ -87,11 +87,23 @@ def set_context(client, user="bob", **changes):
     return client.put("/v1/me/context", headers=auth(user), json=data)
 
 
+def seed_road_fixture(service):
+    """Explicit synthetic test setup, separate from production identity bootstrap."""
+    with service.scope() as db:
+        for user, place in (("alice", "demo_approach"), ("bob", "zhonghuan_jinke")):
+            db.execute(
+                "UPDATE profiles SET place_id=?,direction='demo_exit',source='simulated' WHERE user_id=?",
+                (place, user),
+            )
+
+
 @pytest.fixture
 def env(tmp_path):
     now = [1792720800.0]
     settings = Settings(_env_file=None, data_dir=tmp_path, alice_token=ALICE, bob_token=BOB)
     app = create_app(settings, lambda: now[0])
     app.state.service.seed()
+    # Synthetic legacy road fixtures belong to tests, never production bootstrap.
+    seed_road_fixture(app.state.service)
     with TestClient(app) as client:
         yield client, app.state.service, now, settings

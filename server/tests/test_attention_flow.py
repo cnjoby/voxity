@@ -3,7 +3,7 @@ import json
 
 import httpx
 import pytest
-from conftest import answer, auth, draft, publish, set_context
+from conftest import answer, auth, publish, set_context
 
 from app.attention_worker import AttentionWorker
 from app.decision import Attention
@@ -40,31 +40,18 @@ def row(s):
         )
 
 
-def test_notification_requires_decision_and_closes_full_reply_loop(env):
+def test_notification_is_immediate_and_closes_full_reply_loop(env):
     c, s, _, _ = enable(env)
     qid = publish(c)
     inv = row(s)
-    assert c.get("/v1/inbox", headers=auth("bob")).json()["items"] == []
-    assert not c.get(f"/v1/inbox/{inv['id']}", headers=auth("bob")).json()["delivery"]["actionable"]
-    assert c.get(f"/v1/audio/{qid}", headers=auth("bob")).status_code == 404
+    pending = c.get("/v1/inbox", headers=auth("bob")).json()["items"][0]
+    assert pending["payload"]["attention"]["model_action"] == "pending"
+    assert pending["payload"]["attention"]["blocking"] is False
+    assert c.get(f"/v1/audio/{qid}", headers=auth("bob")).status_code == 200
     assert c.get("/v1/inbox/" + inv["id"], headers=auth()).status_code == 404
-    assert (
-        c.post(
-            f"/v1/inbox/{inv['id']}/ack",
-            headers=auth("bob"),
-            json={"request_id": inv["request_id"], "event": "alerted"},
-        ).status_code
-        == 409
-    )
-    r = draft(
-        c,
-        "bob",
-        {"kind": "answer", "transcript": "这里很堵", "reply_to": qid, "invitation_id": inv["id"]},
-    )
-    assert r.status_code == 409
     assert step(s)
     received = c.get("/v1/inbox", headers=auth("bob")).json()["items"][0]
-    assert received["payload"]["attention"]["provider"] == "bamboo"
+    assert received["payload"]["attention"]["provider"] == "sonar"
     assert received["payload"]["attention"]["action"] == "notify"
     assert c.get(f"/v1/audio/{qid}", headers=auth("bob")).status_code == 200
     c.post(
@@ -94,7 +81,8 @@ def test_decisions_are_cached_per_delivery_and_survive_service_restart(env, acti
     assert step(s)
     for _ in range(10):
         items = c.get("/v1/inbox", headers=auth("bob")).json()["items"]
-        assert bool(items) == (action == "notify")
+        assert items
+        assert items[0]["payload"]["attention"]["model_action"] == action
         assert not step(s)
     assert len(s.decider.calls) == 1
     restarted = Service(settings, s.clock)
@@ -103,7 +91,8 @@ def test_decisions_are_cached_per_delivery_and_survive_service_restart(env, acti
     assert restarted.decider.calls == []
     with restarted.scope() as db:
         items = restarted.inbox(db, "bob")["items"]
-        assert bool(items) == (action == "notify")
+        assert items
+        assert items[0]["payload"]["attention"]["model_action"] == action
 
 
 @pytest.mark.parametrize("change", ["quiet", "disabled", "place", "expired"])
@@ -163,8 +152,10 @@ def test_late_notify_cannot_override_current_rules(env, change):
     if change == "presence_expiry":
         now[0] += settings.presence_ttl + 1
     assert not s.finish_attention(snapshot, Attention("notify", "MODEL_DECISION", 0.99, 0.001))
-    assert not c.get("/v1/inbox", headers=auth("bob")).json()["items"]
-    assert c.get(f"/v1/audio/{qid}", headers=auth("bob")).status_code == 404
+    assert bool(c.get("/v1/inbox", headers=auth("bob")).json()["items"]) == (change == "focus")
+    assert c.get(f"/v1/audio/{qid}", headers=auth("bob")).status_code == (
+        200 if change == "focus" else 404
+    )
 
 
 def test_inference_does_not_hold_database_lock_and_quiet_wins_in_flight(env):
@@ -211,6 +202,12 @@ def test_timeout_is_bounded_cached_defer_and_does_not_stop_other_deliveries(env)
     publish(c)
     assert step(s)
     assert json.loads(row(s)["attention_json"])["reason"] == "MODEL_TIMEOUT"
+    assert (
+        c.get("/v1/inbox", headers=auth("bob")).json()["items"][0]["payload"]["attention"][
+            "model_action"
+        ]
+        == "defer"
+    )
     assert not step(s) and s.decider.calls == 1
     assert c.get("/healthz").status_code == 200
     assert c.get("/v1/me", headers=auth()).status_code == 200
@@ -254,11 +251,19 @@ def test_lifespan_runs_real_worker_with_mocked_transport_and_shuts_it_down(tmp_p
         )
     )
     app.state.service.seed()
+    from conftest import seed_road_fixture
+
+    seed_road_fixture(app.state.service)
     app.state.service.decider = BambooDecision("fixture", transport=httpx.MockTransport(provider))
     with TestClient(app) as c:
         publish(c)
         end = time.monotonic() + 3
-        while not c.get("/v1/inbox", headers=auth("bob")).json()["items"]:
+        while (
+            c.get("/v1/inbox", headers=auth("bob")).json()["items"][0]["payload"]["attention"][
+                "model_action"
+            ]
+            == "pending"
+        ):
             assert time.monotonic() < end
             time.sleep(0.02)
         assert len(calls) == 1
@@ -319,7 +324,10 @@ def test_shared_model_keeps_each_recipients_focus_and_result_isolated(env):
     assert step(s) and step(s)
     assert len(s.decider.calls) == 2
     assert c.get("/v1/inbox", headers=auth("bob")).json()["items"]
-    assert not c.get("/v1/inbox", headers={"Authorization": "Bearer " + "c" * 40}).json()["items"]
+    carol = c.get("/v1/inbox", headers={"Authorization": "Bearer " + "c" * 40}).json()["items"][0]
+    bob = c.get("/v1/inbox", headers=auth("bob")).json()["items"][0]
+    assert carol["payload"]["attention"]["model_action"] == "ignore"
+    assert bob["payload"]["attention"]["model_action"] == "notify"
 
 
 def test_old_quiet_status_is_repaired_once_without_unmuting_or_changing_new_preferences(env):

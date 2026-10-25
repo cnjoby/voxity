@@ -6,8 +6,10 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.NoiseSuppressor
+import android.os.SystemClock
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.delay
 
 /** A single microphone owner. Echo support is reported, never assumed from the model name. */
 class ExchangeCapture {
@@ -24,7 +26,7 @@ class ExchangeCapture {
     }
 
     @SuppressLint("MissingPermission")
-    suspend fun run(onStart: () -> Unit, onSegment: (ByteArray, Boolean) -> Unit, allowed: () -> Boolean = { true }) = withContext(Dispatchers.IO) {
+    suspend fun run(onStart: () -> Unit, onSegment: (ByteArray, Boolean) -> Unit, allowed: () -> Boolean = { true }, onReady: () -> Unit = {}, isSpeakerEcho: (ByteArray) -> Boolean = { false }, onSilence: () -> Unit = {}) = withContext(Dispatchers.IO) {
         val min = AudioRecord.getMinBufferSize(16000, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
         check(min > 0) { "本机不支持自然交流录音" }
         val mic = AudioRecord.Builder()
@@ -46,16 +48,27 @@ class ExchangeCapture {
             })
             mic.startRecording()
             check(mic.recordingState == AudioRecord.RECORDSTATE_RECORDING) { "系统未允许麦克风采集" }
+            onReady()
             val frame = ByteArray(640)
             var count = 0
+            var lastRead = SystemClock.elapsedRealtime()
             while (running) {
-                val n = mic.read(frame, count, frame.size - count)
+                val n = mic.read(frame, count, frame.size - count, AudioRecord.READ_NON_BLOCKING)
                 if (!running) break
                 check(n >= 0) { "麦克风被系统中断" }
-                if (n == 0) continue
+                if (n == 0) {
+                    check(SystemClock.elapsedRealtime() - lastRead < 5000) { "系统暂停了麦克风采集，请检查麦克风权限后重新开始" }
+                    delay(10)
+                    continue
+                }
+                lastRead = SystemClock.elapsedRealtime()
                 count += n
                 if (count == frame.size) {
-                    if (allowed()) vad.accept(frame) else vad.reset()
+                    val wasSpeaking = vad.speaking
+                    if (allowed()) {
+                        if (vad.active || !isSpeakerEcho(frame)) vad.accept(frame)
+                    } else vad.reset()
+                    if (wasSpeaking && !vad.speaking) onSilence()
                     speaking = vad.active; count = 0
                 }
             }

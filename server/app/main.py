@@ -1,16 +1,18 @@
 import asyncio
+import logging
 import time
 from contextlib import asynccontextmanager, suppress
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, File, Form, Header, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import TypeAdapter, ValidationError
 
 from .attention_worker import AttentionWorker
 from .audio import MAX_AUDIO
 from .config import Settings
+from .contracts import AgentTurnResult, SessionCapabilities, VoiceMessageView
 from .errors import Problem
 from .models import (
     Ack,
@@ -21,11 +23,59 @@ from .models import (
     ExchangeContext,
     ExchangeStart,
     ExchangeUtterance,
+    InformationCheck,
+    InformationQuery,
     Listening,
     LocationUpdate,
+    RemotePlaceUpdate,
+    TaskAction,
     VoiceQueue,
 )
 from .service import Service
+
+voice_log = logging.getLogger("sonar.voice")
+
+
+def audio_agent(scope):
+    agent = dict(scope.get("headers", [])).get(b"user-agent", b"").decode("utf-8", "replace")
+    return "".join(c for c in agent if c.isprintable())[:80]
+
+
+class AudioTrace:
+    """Bounded audio transfer metadata; never log headers, tokens or speech bodies."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        path = scope.get("path", "")
+        if (
+            scope["type"] != "http"
+            or scope.get("method") != "GET"
+            or not path.startswith("/v1/audio/")
+        ):
+            return await self.app(scope, receive, send)
+        status, size = 0, 0
+
+        async def counted(message):
+            nonlocal status, size
+            if message["type"] == "http.response.start":
+                status = message["status"]
+            elif message["type"] == "http.response.body":
+                size += len(message.get("body", b""))
+            await send(message)
+
+        try:
+            await self.app(scope, receive, counted)
+        finally:
+            voice_log.info(
+                "audio_transfer path=%r status=%s bytes=%s scheme=%s agent=%r",
+                path[:100],
+                status,
+                size,
+                scope.get("scheme"),
+                audio_agent(scope),
+            )
 
 
 class UploadLimit:
@@ -47,7 +97,7 @@ class UploadLimit:
             if message["type"] == "http.disconnect":
                 return
             data.extend(message.get("body", b""))
-            if len(data) > 350 * 1024:
+            if len(data) > 1024 * 1024:
                 response = JSONResponse(
                     Problem(413, "BODY_TOO_LARGE", "上传请求过大").body(), status_code=413
                 )
@@ -62,6 +112,9 @@ class UploadLimit:
 
 
 def create_app(settings: Settings | None = None, clock=time.time):
+    # Upstream request URLs can contain provider credentials in query parameters.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    voice_log.setLevel(logging.INFO)
     settings = settings or Settings()
     service = Service(settings, clock)
 
@@ -84,6 +137,7 @@ def create_app(settings: Settings | None = None, clock=time.time):
     app = FastAPI(title="Sonar", version="0.1.0", lifespan=lifespan)
     app.state.service = service
     app.add_middleware(UploadLimit)
+    app.add_middleware(AudioTrace)
 
     @app.exception_handler(Problem)
     async def problem_handler(request, exc):
@@ -119,6 +173,45 @@ def create_app(settings: Settings | None = None, clock=time.time):
     def me(db=DB, uid=USER):
         return service.me(db, uid)
 
+    @app.get("/v1/contracts")
+    def contracts(uid=USER):
+        return {
+            "schema_version": "1",
+            "schemas": {
+                model.__name__: model.model_json_schema()
+                for model in (VoiceMessageView, AgentTurnResult, SessionCapabilities)
+            },
+            **service.now(),
+        }
+
+    @app.get("/v1/messages/{message_id}")
+    def message_view(message_id: str, db=DB, uid=USER):
+        return {"message": service.message_view(db, uid, message_id), **service.now()}
+
+    @app.post("/v1/information")
+    def information(data: InformationQuery, db=DB, uid=USER):
+        return service.find_information(db, uid, data.place_id, data.query, data.purpose)
+
+    @app.post("/v1/information/validate")
+    def information_check(data: InformationCheck, db=DB, uid=USER):
+        return service.validate_information(db, uid, data.message_ids, data.purpose)
+
+    @app.get("/v1/tasks")
+    def personal_tasks(db=DB, uid=USER):
+        return service.personal_tasks(db, uid)
+
+    @app.get("/v1/tasks/{task_id}")
+    def personal_task(task_id: str, db=DB, uid=USER):
+        return service.personal_task_view(db, uid, task_id)
+
+    @app.post("/v1/tasks/{task_id}/actions")
+    def task_action(task_id: str, data: TaskAction, db=DB, uid=USER):
+        return service.change_personal_task(db, uid, task_id, **data.model_dump())
+
+    @app.get("/v1/requests/{request_id}")
+    def request_result(request_id: str, db=DB, uid=USER):
+        return service.request_result(db, uid, request_id)
+
     @app.put("/v1/me/context")
     def context(data: Context, db=DB, uid=USER):
         return service.context(db, uid, data)
@@ -133,9 +226,18 @@ def create_app(settings: Settings | None = None, clock=time.time):
 
     LOCATION_USER = Depends(location_user)
 
+    @app.put("/v1/me/remote-place")
+    def remote_place(data: RemotePlaceUpdate, db=DB, uid=USER):
+        return service.select_remote_place(db, uid, data)
+
     @app.post("/v1/exchange/sessions")
+    @app.post("/v1/agent/sessions")
     def start_exchange(data: ExchangeStart, db=DB, uid=USER):
         return service.start_exchange(db, uid, data)
+
+    @app.post("/v1/agent/sessions/{sid}/turns")
+    async def agent_turn(sid: str, data: ExchangeUtterance, uid=LOCATION_USER):
+        return await service.submit_agent_turn(uid, sid, data)
 
     @app.get("/v1/exchange/sessions/{sid}")
     def exchange_session(sid: str, db=DB, uid=USER):
@@ -176,6 +278,8 @@ def create_app(settings: Settings | None = None, clock=time.time):
 
     @app.put("/v1/me/location")
     def location(data: LocationUpdate, uid=LOCATION_USER):
+        if data.location and data.location.source in ("simulated_place", "remote_place"):
+            raise Problem(422, "SIMULATION_ENDPOINT_REQUIRED", "模拟点位请使用专用接口")
         if data.location:
             service.check_fix(data.location)
         resolved = service.geo.resolve(data.location) if data.location else None
@@ -236,8 +340,17 @@ def create_app(settings: Settings | None = None, clock=time.time):
         return {"delivery": service.delivery(db, uid, did), **service.now()}
 
     @app.post("/v1/inbox/{did}/ack")
-    def ack(did: str, data: Ack, db=DB, uid=USER):
-        return service.ack(db, uid, did, data.event, data.request_id)
+    def ack(did: str, data: Ack, request: Request, db=DB, uid=USER):
+        result = service.ack(db, uid, did, data.event, data.request_id)
+        voice_log.info(
+            "audio_ack user=%s delivery=%s event=%s scheme=%s agent=%r",
+            uid,
+            did,
+            data.event,
+            request.scope.get("scheme"),
+            audio_agent(request.scope),
+        )
+        return result
 
     @app.put("/v1/me/listening")
     def listening(data: Listening, db=DB, uid=USER):
@@ -269,6 +382,10 @@ def create_app(settings: Settings | None = None, clock=time.time):
         return FileResponse(
             service.store.audio_dir / f"{p['id']}.wav", media_type="audio/wav", filename="voice.wav"
         )
+
+    @app.get("/v1/chat/audio/{mid}")
+    def chat_audio(mid: str, db=DB, uid=USER):
+        return Response(service.chat_audio(db, uid, mid), media_type="audio/wav")
 
     from .mcp import ProtectedMCP
 

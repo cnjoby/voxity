@@ -13,7 +13,7 @@ from .models import VoiceDraft
 from .service import Service, stamp
 from .storage import digest
 
-ASSETS = Path(__file__).resolve().parents[2] / "android/app/src/main/assets/demo"
+ASSETS = Path(__file__).resolve().parents[1] / "demo-assets"
 USER = "synthetic_audio_test"
 
 
@@ -21,7 +21,7 @@ def fixture_request_id(version, clip_id):
     return str(uuid5(NAMESPACE_URL, f"sonar/demo-audio/v{version}/{clip_id}"))
 
 
-def import_demo(service, assets=ASSETS):
+def import_demo(service, assets=ASSETS, *, shared=False):
     manifest = json.loads((assets / "manifest.json").read_text())
     version = manifest.get("version", 1)
     if not isinstance(version, int) or not 1 <= version <= 100:
@@ -61,13 +61,14 @@ def import_demo(service, assets=ASSETS):
             )
             db.execute("INSERT OR IGNORE INTO channel_operators VALUES (?,?)", (cid, USER))
         for clip in manifest["clips"]:
-            request_id = fixture_request_id(version, clip["id"])
+            request_id = fixture_request_id(version, ("shared/" if shared else "") + clip["id"])
             # Never renew an expired/withdrawn fixture or overwrite its immutable metadata.
             if db.execute(
                 "SELECT 1 FROM posts WHERE author_id=? AND client_request_id=?", (USER, request_id)
             ).fetchone():
                 continue
-            announcement = clip["category"] == "公告"
+            # Shared fixtures are permanent, explicitly synthetic examples, not live notices.
+            announcement = clip["category"] == "公告" and not shared
             fields = dict(
                 client_request_id=request_id,
                 kind="announcement" if announcement else "scene",
@@ -93,7 +94,7 @@ def import_demo(service, assets=ASSETS):
         # Keep immutable prior audio/history; retire only this generator's known older
         # fixture IDs after the replacement batch has been validated and published.
         for clip in manifest["clips"]:
-            for previous in range(1, version):
+            for previous in range(1, version + int(shared)):
                 old = db.execute(
                     "SELECT id FROM posts WHERE author_id=? AND client_request_id=? AND target_place_id=?",
                     (USER, fixture_request_id(previous, clip["id"]), clip["place_id"]),
@@ -106,10 +107,20 @@ def import_demo(service, assets=ASSETS):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--assets", type=Path, default=ASSETS)
+    parser.add_argument(
+        "--shared",
+        action="store_true",
+        help="Publish persistent, labelled synthetic examples for all users",
+    )
     args = parser.parse_args()
-    count = import_demo(Service(Settings()), args.assets)
+    count = import_demo(Service(Settings()), args.assets, shared=args.shared)
+    mode = (
+        "Shared synthetic examples persist until explicitly withdrawn."
+        if args.shared
+        else "Test announcements expire within 24h; offline previews remain available."
+    )
     print(
-        f"Imported {count} synthetic voices; existing profiles, tasks and voices preserved. Test announcements expire within 24h; offline previews remain available."
+        f"Imported {count} synthetic voices; existing profiles, tasks and voices preserved. {mode}"
     )
 
 

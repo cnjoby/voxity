@@ -365,7 +365,7 @@ class LinxDeviceTest {
                 vm.state.value.playing != null
         )
         val source =
-            compose.activity.resources.openRawResource(R.raw.onsite_question).use { it.readBytes() }
+            InstrumentationRegistry.getInstrumentation().context.assets.open("control/onsite_question.wav").use { it.readBytes() }
         val bytes = ByteBuffer.wrap(source).order(ByteOrder.LITTLE_ENDIAN)
         assertEquals(16000, bytes.getInt(24))
         assertEquals(1, bytes.getShort(22).toInt())

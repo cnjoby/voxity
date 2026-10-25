@@ -97,7 +97,7 @@ class PhoneAcceptanceTest {
                 assertTrue("Fix must be fresh", age in -1..55)
                 compose.runOnIdle {
                     vm.configure(
-                        original.copy(mock = false, simulatedLocation = false, testPlaceId = "")
+                        original.copy(mock = false, simulatedLocation = false, testPlaceId = "", remotePlaceId = "")
                     )
                     vm.refreshLocation()
                 }
@@ -140,15 +140,18 @@ class PhoneAcceptanceTest {
                 .put("media_max_volume", manager.getStreamMaxVolume(AudioManager.STREAM_MUSIC))
             save()
             assertTrue("Media volume is zero", volume > 0)
-            val library = DemoLibrary(compose.activity)
-            val clips =
-                listOf(
-                    library.clips.first { it.category == "公告" },
-                    library.clips.first {
-                        it.category == "路况" && it.placeId == "demo:ai-island-19"
-                    },
-                    library.clips.first { it.category == "闲聊" && it.placeId == "demo:modaily" },
-                )
+            // Acceptance audio comes from the authenticated server, never the APK.
+            val api = HttpSonarApi(original.baseUrl, original.token, ServerClock(SystemClock::elapsedRealtime), BuildConfig.DEBUG)
+            val clips = listOf("B0K2KHYN77", "B0FFJSBSGR", "B0FFHPHNSH").map { id ->
+                val item = api.voices(id).objects("items").first { it.optBoolean("synthetic") }
+                val file = File(compose.activity.cacheDir, "acceptance-${item.getString("post_id")}.wav")
+                file.writeBytes(api.download(item.getString("audio_url")))
+                val metadata = android.media.MediaMetadataRetriever()
+                val duration = try { metadata.setDataSource(file.absolutePath)
+                    metadata.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)!!.toLong() / 1000.0
+                } finally { metadata.release() }
+                Triple(item, file, duration)
+            }
             val outcomes = JSONArray()
             report.put("playback", outcomes)
             val playerField =
@@ -158,7 +161,7 @@ class PhoneAcceptanceTest {
             for (clip in clips) {
                 val time = SystemClock.elapsedRealtime()
                 val playing = async {
-                    withTimeout(12000) { audio.play(library.file(clip), AudioMode.PREVIEW) }
+                    withTimeout(12000) { audio.play(clip.second, AudioMode.PREVIEW) }
                 }
                 delay(700)
                 var active = false
@@ -168,14 +171,15 @@ class PhoneAcceptanceTest {
                     active = player?.isPlaying == true
                     deviceType = player?.routedDevice?.type
                 }
-                assertTrue("MediaPlayer did not start: ${clip.id}", active)
+                assertTrue("MediaPlayer did not start: ${clip.first.getString("post_id")}", active)
                 playing.await()
+                clip.second.delete()
                 val elapsed = SystemClock.elapsedRealtime() - time
-                assertTrue("Playback ended prematurely", elapsed >= clip.duration * 1000 - 700)
+                assertTrue("Playback ended prematurely", elapsed >= clip.third * 1000 - 700)
                 outcomes.put(
                     json(
-                        "clip" to clip.id,
-                        "category" to clip.category,
+                        "clip" to clip.first.getString("post_id"),
+                        "category" to "server_synthetic",
                         "completed" to true,
                         "elapsed_ms" to elapsed,
                         "device_type" to deviceType,

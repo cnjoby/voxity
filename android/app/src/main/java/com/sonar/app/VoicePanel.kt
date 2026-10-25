@@ -96,7 +96,7 @@ fun PlaceVoices(s: ScreenState, vm: SonarViewModel, onRecord: (Delivery?) -> Uni
             enabled = s.connected && !s.busy && s.selectedPlace != null && !s.config.mock,
             modifier = Modifier.fillMaxWidth().testTag("browse-voices"),
         ) {
-            Text("听听这里的故事与公告")
+            Text(if (s.config.testPlaceId.isNotBlank()) "刷新这个点位的服务器声音" else "听听这里的故事与公告")
         }
         if (s.catalogPlace != null) {
             Text(
@@ -214,6 +214,8 @@ fun PlaceVoices(s: ScreenState, vm: SonarViewModel, onRecord: (Delivery?) -> Uni
 
 @Composable
 fun VoiceProvenance(item: JSONObject) {
+    if (item.optBoolean("synthetic"))
+        Text("合成测试内容 · 非实时公告、路况或真人发言", style = MaterialTheme.typography.labelMedium)
     Text(
         "${item.text("author_label")} · ${voiceTime(item.text("published_at"))}",
         style = MaterialTheme.typography.labelMedium,

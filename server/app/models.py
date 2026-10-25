@@ -1,7 +1,9 @@
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StringConstraints, model_validator
+
+from .contracts import SessionCapabilities
 
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=1000)]
 Place = Literal["zhonghuan_jinke", "demo_approach"]
@@ -31,12 +33,17 @@ class LocationFix(StrictModel):
     coordinate_system: Literal["wgs84", "gcj02"] = "wgs84"
     accuracy_m: float = Field(gt=0, le=100000, allow_inf_nan=False)
     sampled_at: AwareDatetime
-    source: Literal["android", "android_mock"] = "android"
+    source: Literal["android", "android_mock", "remote_place"] = "android"
 
 
 class LocationUpdate(StrictModel):
     expected_revision: int = Field(ge=1)
     location: LocationFix | None
+
+
+class RemotePlaceUpdate(StrictModel):
+    expected_revision: int = Field(ge=1)
+    place_id: str = Field(min_length=1, max_length=100)
 
 
 class QuestionDraft(StrictModel):
@@ -94,6 +101,8 @@ class VoiceDraft(StrictModel):
     scope_label: Text | None = None
     valid_from: AwareDatetime | None = None
     valid_until: AwareDatetime | None = None
+    validity_policy: Literal["bounded", "until_withdrawn"] = "bounded"
+    content_origin: Literal["human_original", "agent_synthesized"] = "human_original"
     applicability: Literal["unconditional", "unknown"] = "unconditional"
     source_note: Text | None = None
     topics: list[Text] = Field(default_factory=list, max_length=10)
@@ -126,9 +135,21 @@ class VoiceQueue(StrictModel):
 class ExchangeStart(StrictModel):
     client_request_id: UUID
     expected_revision: int = Field(ge=1)
-    place_id: str = Field(min_length=1, max_length=100)
-    auto_publish: bool = Field(strict=True)
-    auto_play: bool = Field(strict=True)
+    place_id: str = Field(default="", max_length=100)
+    interaction_mode: Literal["voice_first"] = "voice_first"
+    timezone: str = Field(default="Asia/Shanghai", max_length=100)
+    auto_publish: bool = Field(default=False, strict=True)
+    auto_play: bool = Field(default=False, strict=True)
+    network_enabled: bool = Field(default=False, strict=True)
+    capabilities: SessionCapabilities | None = None
+
+    @model_validator(mode="after")
+    def unambiguous_authorization(self):
+        if self.capabilities is not None and self.model_fields_set.intersection(
+            {"auto_publish", "auto_play", "network_enabled"}
+        ):
+            raise ValueError("Use capabilities or legacy flags, never both")
+        return self
 
 
 class ExchangeChange(StrictModel):
@@ -146,3 +167,20 @@ class ExchangeUtterance(StrictModel):
     expected_session_revision: int = Field(ge=1)
     transcript: Text
     recorded_at: AwareDatetime
+
+
+class InformationQuery(StrictModel):
+    place_id: str = Field(min_length=1, max_length=100)
+    query: str = Field(default="", max_length=1000)
+    purpose: Literal["all", "parking", "weather", "route", "knowledge"] = "all"
+
+
+class InformationCheck(StrictModel):
+    message_ids: list[Text] = Field(max_length=20)
+    purpose: Literal["all", "parking", "weather", "route", "knowledge"] = "all"
+
+
+class TaskAction(StrictModel):
+    expected_revision: int = Field(ge=1)
+    client_request_id: UUID
+    action: Literal["resolve", "cancel"]

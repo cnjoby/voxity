@@ -189,3 +189,31 @@ get_feed 的 request_id 在服务器内存保存已授权候选、用户与版�
 ## 10. 自然现场交流（2026-10-25）
 
 [自然交流接口与实现](natural-exchange.md)新增独立 exchange 会话、自然 utterance、相关原声 inbox 和当前原声 context。用户在会话层分别授权自动发布与收听，逐条手动确认不再是该模式默认路径；旧手动草稿协议保留。scene 可以成为真实回复根，不能伪造 question/invitation。正常成功不播系统控制声音。物理范围、时效、访问、版本和播放回执仍由确定性规则复核。Android 与服务端已有实现，ESP32 与车内声学待验收。
+
+## 11. 语音互动网络增量（2026-10-25，后端已部署）
+
+[语音网络实现协议](voice-network.md)定义 `network_enabled`（旧会话默认 false）、私有工具回应、地点澄清、远程真人问答、双向闲聊和 Agent 陪聊的明确同意。`chat` 使用独立任务与参与者可见的原声，不复用互助开关或公共帖子。新增 MCP `find_places / get_place_weather / get_driving_route` 为只读业务能力，身份校验不变，不能代替终端上传原声或发问。
+
+## 12. 统一契约与语音入口（SNR-001 / SNR-002）
+
+[实现、权限映射与验证](snr-001-002.md)冻结 `VoiceMessageView / AgentTurnResult / SessionCapabilities` v1，提供 [JSON Schema](contracts/v1/schemas.json) 和[跨端 fixture](fixtures/contracts-v1.json)。新增 `/v1/contracts`、`/v1/messages/{id}`、`/v1/agent/sessions`、`/v1/agent/sessions/{sid}/turns` 及 MCP `agent_turn`。旧录音入口委托同一应用执行逻辑，保留旧字段并新增 `result`。分项能力与旧标志不能混用；旧会话保持原指纹和授权范围。私人查询可独立于公开许可，纯文本不能伪造真人原声；合法已有原声的地点澄清可以通过文本完成。此增量已随 [SNR-003/004 后端发布](../../deploy/deployment-snr-003-004-20261025.md)，旧固件可继续使用原协议；设备接入与真实语音验收独立。
+
+
+## 13. 合法信息检索与个人任务（SNR-003 / SNR-004）
+
+实现及验证见 [SNR-003/004](snr-003-004.md)。以下接口均使用既有 Bearer 用户鉴权，MCP 使用既有可信设备映射；其他人的任务返回不可见错误，不接受输入用户身份。旧响应字段保留，统一 `AgentTurnResult` v1 未变，轮次外层新增 `task_id`。
+
+| 接口 | 输入及输出 |
+| --- | --- |
+| POST `/v1/information` | `{place_id,query?:string,purpose?:"all"或"parking"或"weather"或"route"或"knowledge"}`；`{place_id,purpose,items,status,requires_source_comparison,server_time}`，status 为 available/no_valid_information |
+| POST `/v1/information/validate` | `{message_ids:[id],purpose?:同上}`，最多 20 个；`{valid,valid_message_ids,server_time}`。播放动态来源须沿用原 retrieval_purpose，不用 all 放宽时效 |
+| GET `/v1/tasks` | `{items:[task],server_time}`，当前至多 50 条，按更新时间倒序 |
+| GET `/v1/tasks/{task_id}` | task：id/revision/request_id/kind/status/original_text/place_id/question_id/conversation_id/reason_code/created_at/updated_at/expires_at/sources/deliveries/last_result/server_time |
+| POST `/v1/tasks/{task_id}/actions` | `{expected_revision,client_request_id:UUID,action:"resolve"或"cancel"}`；返回 task。同 UUID 同输入幂等；不同输入 409 IDEMPOTENCY_CONFLICT、旧版本 409 REVISION_CONFLICT、已关闭 410 TASK_CLOSED |
+| GET `/v1/requests/{request_id}` | 原 UUID 对应 `{request_id,turn,task,server_time}`；旧手动草稿为 `{request_id,post,server_time}`。未知 404 REQUEST_NOT_FOUND，非法 UUID 422 INVALID_REQUEST_ID。查询无重发副作用 |
+
+items 包含原 voice_payload 字段及 observed_at/content_origin/temporal_class/observation_time_known/retrieval_reason/version/retrieval_purpose；结果保留来源范围、发布时间和有效期。版本为当前不可变声音 ID，替代／撤回仍须即时访问和时效复核。任务 sources 的 currently_valid 是读取时判断；历史 last_result 不是当前播放许可。工具来源还受有效期约束。无数据不是否定现场事实。
+
+任务状态 querying/clarifying/waiting/responded/deferred/resolved/cancelled/timed_out/failed 与 delivery 状态独立；answered、received、played 均不代表需求解决。动作只管理本人任务，不能通过结束回应者任务取消其他人的待听内容。HTTP 请求成功也不表示已播放。未知提交先持久保存原请求，再只读核对；不能更换 UUID 自动重发。
+
+MCP `find_information(place_id,query?,purpose?) / get_tasks(task_id?) / get_request(request_id) / set_task_state(task_id,expected_revision,client_request_id,action)` 调用同一规则。`get_feed/queue_voice` 新类型继续使用原请求候选、profile_revision、权限、时效及交付唯一性校验。邀请 payload 的 collaboration 补充原请求／任务、deadline、visibility、version 和允许动作，不授予接收者自动回应／公开权限。

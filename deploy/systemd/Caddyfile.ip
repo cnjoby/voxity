@@ -17,3 +17,18 @@
 		flush_interval -1
 	}
 }
+
+# ESP32 plaintext business API for memory-constrained development devices.
+# Device Bearer authentication still applies; MCP and docs stay on HTTPS.
+http://{$SONAR_PUBLIC_IP} {
+	header -Server
+	@device_api path /healthz /v1/*
+	handle @device_api {
+		reverse_proxy 127.0.0.1:8765 {
+			flush_interval -1
+		}
+	}
+	handle {
+		redir https://{$SONAR_PUBLIC_IP}{uri} permanent
+	}
+}

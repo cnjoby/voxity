@@ -2,54 +2,73 @@
 
 听见同路的声音。
 
-人发起问答，广场保存并组织声音，个人 Agent 按主人的意愿筛选、安排播放并追踪回复。
+声呐是以免提语音为入口、围绕地点和事件连接人与信息的交互语音网络。用户说出需要，个人 Agent 查询有来源的信息、联系愿意回应的现场参与者，并追踪原声回复。私人助手对话、公开声音、个人任务与每位收件人的播放状态分别管理。
 
-两天黑客松原型：Android 定位并提问，处在目标附近且愿意互助的参与者收到邀请，自愿回答后提问者听到原声。自有业务服务单机部署，语音交互计划接入 Linx；ESP32 由硬件成员实现。
+## 当前源码与交付
 
-自然现场交流 `v0.1.1`：一次授权后自动分享明确现场原声，在空隙接续相关真人回复，正常路径保持安静。[接口与能力边界](docs/development/natural-exchange.md) · [发布审查](docs/development/review-20261025.md) · [最新部署](deploy/deployment-20261025.md) · [APK 下载](https://github.com/cnjoby/voxity/releases/tag/v0.1.1)。
+2026-10-26 核对：Android **0.2.3（versionCode 9）**；服务端包含会话优先与天气路由修复，既有发布标识为 `20261026-conversation-first-025`。本次 GitHub 上传验证与历史部署/设备验收分别记录，不据此宣称重新部署。
 
-## 工程入口
-
-| 目录 | 内容 |
+| 交付内容 | 入口 |
 | --- | --- |
-| [server](server/README.md) | FastAPI、SQLite、原声文件、个人任务及 MCP 适配 |
-| [android](android/README.md) | Kotlin、Compose、录音、提问、等待、播放与私有配置 |
-| [deploy](deploy/README.md) | 单机容器与 HTTPS 代理配置 |
-| [docs/design](docs/design/README.md) | 产品定义、架构与评审 |
-| [开发计划](two-day-development.md) | 三端分工、接口契约与验收 |
+| 下载、依赖、启动、构建、安装与使用 | [完整运行指南](docs/RUNNING.md) |
+| 当前实现、模块规格、接口、状态所有权与角色分工 | [架构与模块规格](docs/design/module-specs.md) |
+| 产品定义、六要素消息、业务线与下一阶段设计 | [产品架构](docs/design/product-architecture.md) |
+| 最新现有 PPT、讲述备注、内嵌/独立原理动画 | [路演材料](docs/presentations/README.md) |
+| 本次上传范围与验证证据 | [2026-10-26 交付记录](docs/delivery/github-20261026.md) |
 
-服务端已完成本地业务闭环；Android 已通过前台定位、真实高德 POI、附近邀请与双用户录音问答的模拟器闭环。定位为显式注入坐标，双方录音由模拟器 AudioRecord 产生，转写和确认由测试输入。另已完成真机 Linx 接入，用户确认私人语音收到对话回复；[公网服务](deploy/deployment-20261024.md)已部署并通过 HTTPS、地图/决策、合成问答和重启检查，完整真人公开问答及 ESP32 仍待验收，详见[服务端交接](server/HANDOFF.md)及[Android 交接](android/HANDOFF.md)。
+本仓库包含现有 Android、服务端、测试、脚本和部署配置。ESP32 固件由同事独立更新，本次不包含其源码；对接使用[当前固件接入规范](docs/development/esp32-ai-handoff.md)。灵矽、高德和 Bamboo 为外部服务，实际 Key、设备绑定及运行数据不随源码分发。
 
-## 启动服务端
+## 快速启动服务端
 
-需要 Python 3.12 和 uv。在仓库根目录执行：
+需要 Python 3.12 与 uv。在仓库根目录执行：
 
 ```sh
 cd server
 uv sync --python 3.12 --frozen
 uv run python -m app.cli init-env
 uv run python -m app.cli seed
-uv run uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8765 --no-access-log
+uv run uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8765 --workers 1 --no-access-log
 ```
 
-已有 `.env` 时跳过 init-env。设备凭证在本机生成，不随仓库分发。接口文档位于本机 `/docs`。Android 的构建、安装和 USB 端口映射见其[运行说明](android/README.md)。
+已有 `.env` 时跳过 `init-env`。健康检查为 `http://127.0.0.1:8765/healthz`，接口文档为本机 `/docs`。完整语音体验需配置高德、Bamboo 和灵矽；只启动服务及运行隔离测试不需要这些真实服务凭证。
 
-## 检查
+## 构建 Android 与检查
+
+Android 需要 SDK35、Build Tools 35、JDK17/21、Python3，首次构建会下载校验固定版本的离线中文控制模型。先配置实际 SDK 与 JAVA_HOME，再执行：
 
 ```sh
+# android 目录
+./gradlew testDebugUnitTest lintDebug assembleDebug
+adb -s YOUR_SERIAL install -r app/build/outputs/apk/debug/app-debug.apk
+
 # server 目录
 uv run pytest -q
-
-# android 目录，需 SDK35 与 JDK17/21
-./gradlew testDebugUnitTest lintDebug assembleDebug
+uv run python verify_release.py --synthetic
 ```
 
-两端与设备的验证步骤见[联调验收](docs/development/integration.md)。运行数据、凭证、APK、构建缓存和路演生成文件保存在本地，不进入源码提交。
+手机默认连接既有公网地址。使用本地服务时，需通过 `adb reverse tcp:8765 tcp:8765`、App 连接设置和本地生成的设备 Token 显式切换；灵矽身份独立配置。具体步骤与使用说明见[运行指南](docs/RUNNING.md)。
 
-真实位置接入见[定位协议](docs/development/location.md)。Bamboo/StartLux 原生决策已接入实际邀请筛选与提醒，本机已开启，规则检查与人工确认保留，见[个人声音决策](docs/design/attention-decisions.md)。
+## 工程与设计入口
 
-三类声音扩展已加入服务端与 Android 前台：情境分享、POI 授权运营公告、公开多轮定向回复及独立收听设置。新增协议、运营授权命令、验证结果与模拟器复跑见[声音匹配实现与验收](docs/development/voice-matching.md)。
+| 目录 / 文档 | 内容 |
+| --- | --- |
+| [server](server/README.md) | FastAPI、SQLite、原声、任务、模型/地图适配与 MCP |
+| [android](android/README.md) | Kotlin、Compose、语音运行、录放与私有配置 |
+| [scripts](scripts) | 合成素材生成及 HTTP/语音网络检查脚本 |
+| [deploy](deploy/README.md) | systemd、Caddy、Compose 备选及历史部署记录 |
+| [设计文档](docs/design/README.md) | 产品定义、交互、架构和审查 |
+| [规划索引](docs/planning/INDEX.md) | 开发任务、实现记录和商业叙事 |
+| [v1 契约](docs/development/contracts/v1/schemas.json) | 消息、动作、授权与结果 Schema |
+| [联调验收](docs/development/integration.md) | 软件、平台与实际设备的验证分界 |
+| [原两天计划](two-day-development.md) | 初始三端分工与任务，作为历史排期保留 |
 
-Android 真机已绑定灵矽，真实 PCM STT/TTS 自动检查通过，用户确认“试说一句”收到对话回复；另一次真人自动检查超时，业务 MCP 仍待联调，见[手机接入记录](docs/development/linx-android.md)。
+## 当前行为与历史证据
 
-张江三个地点的 36 条合成测试音频已内置 Android，可在首页切换模拟地点、离线试听或请求手机真实位置。详情见[测试音频与位置切换](docs/development/demo-audio.md)。
+- [2026-10-26 会话优先与天气修复](docs/development/conversation-first-20261026.md)：有效设备邀请不等待模型标记；私人闲聊与天气日期路由修复。该记录包含此前生产与手机结果，本次上传不重做其设备验收。
+- [0.2.3 语音排障](docs/development/audio-incident-20261025.md)：收发阶段、回执、原声播放增益与园区范围；持续真人聊天和 ESP32 输出按设备结果验收。
+- [语音优先实现](docs/development/voice-first-20261025.md)：一个“开始”后以语音完成查、问、听、回复、重播、取消、安静和结束；旧 Mock 与内置地点素材已移除。
+- [地点切换](docs/development/location-switch-20261025.md)：真实高德 POI 远程选择与当前设备真实位置分开。
+- [SNR-001/002](docs/development/snr-001-002.md)、[SNR-003/004](docs/development/snr-003-004.md)、[SNR-005](docs/development/snr-005.md)：统一合同、检索、任务与 Android 增量闭环。
+- [声音匹配](docs/development/voice-matching.md)、[自然交流](docs/development/natural-exchange.md)、[灵矽平台](docs/development/linx-platform.md)、[定位协议](docs/development/location.md)：按各自日期理解实现及验证范围。
+
+最新现有 PPT 原样归档，部分附录状态早于当前源码；以当前架构、运行指南和交付记录为工程入口。运行数据、凭证、APK 和构建缓存留在忽略目录；明确归档的路演成品位于 `docs/presentations/`。

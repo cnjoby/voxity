@@ -17,6 +17,7 @@ import org.json.JSONObject
 
 const val SONAR_BASE_URL = "https://122.195.131.106"
 private const val SERVER_ADDRESS_MIGRATED = "server_address_migrated_v1"
+private const val REMOTE_PLACE_MIGRATED = "remote_place_migrated_v1"
 
 data class DeviceConfig(
     val baseUrl: String = SONAR_BASE_URL,
@@ -30,7 +31,22 @@ data class DeviceConfig(
     val simulatedLocation: Boolean = false,
     val linxOtaUrl: String = LINX_OTA,
     val testPlaceId: String = "",
+    val remotePlaceId: String = "",
 ) {
+    /** Upgrade only selection metadata; credentials, identity and journal scope remain untouched. */
+    internal fun migrateRemotePlace(): DeviceConfig {
+        val oldPlaces = mapOf(
+            "demo:modaily" to "B0K2KHYN77",
+            "demo:ai-island-19" to "B0FFJSBSGR",
+            "demo:zhangjiang-jinke" to "B0FFHPL61V",
+        )
+        val selected = remotePlaceId.ifBlank { oldPlaces[testPlaceId].orEmpty() }
+        // The user replaced this shortcut with Jinke / Gaoke Middle Road; move only
+        // the saved selector, never the recorded location or published message target.
+        return copy(remotePlaceId = if (selected == "B0FFHPHNSH") "B0FFHPL61V" else selected,
+            testPlaceId = "", mock = false, debugTranscript = false, simulatedLocation = false)
+    }
+
     /** Only the old local deployment address is eligible for the one-time upgrade. */
     internal fun migrateLocalServerAddress(): DeviceConfig {
         if (mock) return this
@@ -60,6 +76,7 @@ data class DeviceConfig(
             "simulated_location" to simulatedLocation,
             "linx_ota_url" to linxOtaUrl,
             "test_place_id" to testPlaceId,
+            "remote_place_id" to remotePlaceId,
         )
 
     val scope
@@ -83,6 +100,7 @@ data class DeviceConfig(
                 j.optBoolean("simulated_location"),
                 j.text("linx_ota_url", LINX_OTA),
                 j.text("test_place_id"),
+                j.text("remote_place_id"),
             )
     }
 }
@@ -114,7 +132,7 @@ class ConfigStore(private val context: Context) {
                     hash.take(6).joinToString(":") { "%02X".format(it.toInt() and 255) }
                 }
         check(identity.edit().putString("client", client).putString("device", device).commit())
-        return config.copy(
+        return config.migrateRemotePlace().copy(
             linxDevice = config.linxDevice.ifBlank { device },
             clientId = config.clientId.ifBlank { client },
             linxOtaUrl = if (BuildConfig.DEBUG) config.linxOtaUrl else LINX_OTA,
@@ -151,6 +169,7 @@ class ConfigStore(private val context: Context) {
                 .putString("iv", Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
                 .putString("sealed", Base64.encodeToString(data, Base64.NO_WRAP))
                 .putBoolean(SERVER_ADDRESS_MIGRATED, true)
+                .putBoolean(REMOTE_PLACE_MIGRATED, true)
                 .commit()
         )
     }
@@ -185,10 +204,10 @@ class ConfigStore(private val context: Context) {
                 )
             }
             .getOrElse { throw IllegalStateException("无法解锁本机配置，请清除应用数据后重新配置") }
-        if (!prefs.getBoolean(SERVER_ADDRESS_MIGRATED, false)) {
-            val migrated = config.migrateLocalServerAddress()
-            // Persist the encrypted config and migration marker together. Explicit later edits,
-            // including local debug bootstrap configurations, keep their selected address.
+        val addressDone = prefs.getBoolean(SERVER_ADDRESS_MIGRATED, false)
+        if (!addressDone || !prefs.getBoolean(REMOTE_PLACE_MIGRATED, false)) {
+            val migrated = if (addressDone) config else config.migrateLocalServerAddress()
+            // Commit selection migration with the same encrypted envelope; never clear identity.
             save(migrated)
             return migrated
         }
@@ -198,6 +217,45 @@ class ConfigStore(private val context: Context) {
 
 class TaskStore(context: Context, scope: String) {
     private val prefs = context.getSharedPreferences("tasks-$scope", Context.MODE_PRIVATE)
+
+    @Synchronized fun beginTurn(requestId: String, sessionId: String, metadata: JSONObject) {
+        val key = "request:$requestId"
+        val old = prefs.getString(key, null)?.let(::JSONObject)
+        if (old != null) {
+            check(old.text("session_id") == sessionId && old.getJSONObject("metadata").toString() == metadata.toString()) { "同一请求不能改变内容" }
+            return
+        }
+        val edit = prefs.edit()
+        val known = prefs.all.filterKeys { it.startsWith("request:") }.entries
+            .filter { runCatching { !JSONObject(it.value as String).getBoolean("pending") }.getOrDefault(false) }
+        if (prefs.all.keys.count { it.startsWith("request:") } >= 100) {
+            check(known.isNotEmpty()) { "请停车后先核对待确认的发送结果" }
+            edit.remove(known.first().key)
+        }
+        check(edit.putString(key, json("request_id" to requestId, "session_id" to sessionId,
+            "metadata" to metadata, "pending" to true).toString()).commit())
+    }
+
+    @Synchronized fun recordTurnResult(requestId: String, response: JSONObject) {
+        val key = "request:$requestId"
+        val old = prefs.getString(key, null)?.let(::JSONObject) ?: return
+        val turn = response.optJSONObject("turn") ?: response
+        old.put("result", response)
+        old.put("pending", turn.text("status") in setOf("deciding", "clarifying"))
+        check(prefs.edit().putString(key, old.toString()).commit())
+    }
+
+    fun pendingRequests(): List<JSONObject> = prefs.all.filterKeys { it.startsWith("request:") }.values
+        .mapNotNull { runCatching { JSONObject(it as String) }.getOrNull() }
+        .filter { it.optBoolean("pending", true) }
+
+    @Synchronized fun taskActionId(taskId: String, revision: Int, action: String): String {
+        val key = "task-action:$taskId:$revision:$action"
+        prefs.getString(key, null)?.let { return it }
+        val id = java.util.UUID.randomUUID().toString()
+        check(prefs.edit().putString(key, id).commit())
+        return id
+    }
     var automaticAudioSuspended: Boolean
         get() = prefs.getBoolean("natural-exchange-selected", false)
         set(value) { check(prefs.edit().putBoolean("natural-exchange-selected", value).commit()) }

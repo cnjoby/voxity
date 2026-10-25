@@ -1,5 +1,7 @@
 # Sonar 服务端
 
+2026-10-26 当前源码、环境配置与可复制命令见[统一运行指南](../docs/RUNNING.md)；当前模块与职责见[模块规格](../docs/design/module-specs.md)。下文包含早期实现基线，旧固定目标地点、仅 confirm 发布和 MCP 工具清单不能代替当前契约。当前自然会话采用分项授权，MCP 兼容 Streamable HTTP 与旧 SSE。
+
 FastAPI + SQLite + 音频文件，单进程运行。已实现 S1–S3 的本地业务链路及 S4 的 MCP 适配；平台与设备验收状态见 [HANDOFF](HANDOFF.md)。[三端契约](../docs/development/contracts.md)约定字段与交互。
 
 ## 本机启动

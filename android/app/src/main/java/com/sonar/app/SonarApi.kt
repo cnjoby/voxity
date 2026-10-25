@@ -5,6 +5,12 @@ import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.Response
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
@@ -27,6 +33,8 @@ interface SonarApi {
 
     suspend fun location(revision: Int, fix: JSONObject?): JSONObject = error("此模式不支持定位")
 
+    suspend fun remotePlace(revision: Int, placeId: String): JSONObject = error("此服务尚不支持远程地点")
+
     suspend fun places(query: String): JSONObject = error("此模式不支持地点搜索")
 
     suspend fun listening(data: JSONObject): JSONObject = error("此模式不支持收听设置")
@@ -40,6 +48,13 @@ interface SonarApi {
     suspend fun conversation(qid: String): JSONObject = json("items" to org.json.JSONArray())
 
     suspend fun startExchange(data: JSONObject): JSONObject = error("此服务不支持自然交流")
+    suspend fun agentTurn(id: String, metadata: JSONObject): JSONObject = error("此服务不支持统一语音入口")
+    suspend fun message(postId: String): JSONObject = error("此服务不支持来源核对")
+    suspend fun personalTasks(): JSONObject = json("items" to org.json.JSONArray())
+    suspend fun personalTask(taskId: String): JSONObject = error("此服务不支持任务管理")
+    suspend fun requestResult(requestId: String): JSONObject = error("此服务不支持结果核对")
+    suspend fun taskAction(taskId: String, revision: Int, requestId: String, action: String): JSONObject = error("此服务不支持任务管理")
+    suspend fun validateInformation(messageIds: List<String>, purpose: String = "all"): Boolean = false
     suspend fun exchangeSession(id: String): JSONObject = error("此服务不支持自然交流")
     suspend fun changeExchange(id: String, revision: Int, state: String): JSONObject = error("此服务不支持自然交流")
     suspend fun exchangeContext(id: String, revision: Int, postId: String): JSONObject = error("此服务不支持自然交流")
@@ -125,13 +140,14 @@ class HttpSonarApi(
             executeJson(builder.build())
         }
 
-    private val exchangeClient = client.newBuilder().callTimeout(40, TimeUnit.SECONDS)
-        .readTimeout(35, TimeUnit.SECONDS).build()
+    private val exchangeClient = client.newBuilder().callTimeout(65, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS).build()
 
-    private fun executeJson(request: Request): JSONObject =
-        (if (request.url.encodedPath.startsWith("/v1/exchange/") &&
-            (request.url.encodedPath.endsWith("/utterances") || request.url.encodedPath.endsWith("/inbox")))
-            exchangeClient else client).newCall(request).execute().use { response ->
+    private suspend fun executeJson(request: Request): JSONObject =
+        withResponse(request, if ((request.url.encodedPath.startsWith("/v1/exchange/") &&
+            (request.url.encodedPath.endsWith("/utterances") || request.url.encodedPath.endsWith("/inbox"))) ||
+            (request.url.encodedPath.startsWith("/v1/agent/") && request.url.encodedPath.endsWith("/turns")))
+            exchangeClient else client) { response ->
             val body = response.body?.string().orEmpty()
             val parsed = runCatching { JSONObject(body) }.getOrNull()
             if (!response.isSuccessful) {
@@ -148,12 +164,36 @@ class HttpSonarApi(
             result
         }
 
+    private suspend fun <T> withResponse(request: Request, http: OkHttpClient = client, read: (Response) -> T): T =
+        suspendCancellableCoroutine { continuation ->
+            val call = http.newCall(request)
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    if (continuation.isActive) continuation.resumeWithException(e)
+                }
+                override fun onResponse(call: Call, response: Response) {
+                    response.use {
+                        try {
+                            val value = read(it)
+                            if (continuation.isActive) continuation.resume(value)
+                        } catch (e: Exception) {
+                            if (continuation.isActive) continuation.resumeWithException(e)
+                        }
+                    }
+                }
+            })
+        }
+
     override suspend fun me() = call("/v1/me")
 
     override suspend fun context(data: JSONObject) = call("/v1/me/context", data, "PUT")
 
     override suspend fun location(revision: Int, fix: JSONObject?) =
         call("/v1/me/location", json("expected_revision" to revision, "location" to fix), "PUT")
+
+    override suspend fun remotePlace(revision: Int, placeId: String) =
+        call("/v1/me/remote-place", json("expected_revision" to revision, "place_id" to placeId), "PUT")
 
     override suspend fun places(query: String) =
         call("/v1/places?query=" + java.net.URLEncoder.encode(query, "UTF-8"))
@@ -175,6 +215,15 @@ class HttpSonarApi(
     override suspend fun conversation(qid: String) = call("/v1/conversations/$qid")
 
     override suspend fun startExchange(data: JSONObject) = call("/v1/exchange/sessions", data)
+    override suspend fun agentTurn(id: String, metadata: JSONObject) = call("/v1/agent/sessions/$id/turns", metadata)
+    override suspend fun message(postId: String) = call("/v1/messages/${postId}")
+    override suspend fun personalTasks() = call("/v1/tasks")
+    override suspend fun personalTask(taskId: String) = call("/v1/tasks/$taskId")
+    override suspend fun requestResult(requestId: String) = call("/v1/requests/$requestId")
+    override suspend fun taskAction(taskId: String, revision: Int, requestId: String, action: String) =
+        call("/v1/tasks/$taskId/actions", json("expected_revision" to revision, "client_request_id" to requestId, "action" to action))
+    override suspend fun validateInformation(messageIds: List<String>, purpose: String) =
+        call("/v1/information/validate", json("message_ids" to org.json.JSONArray(messageIds), "purpose" to purpose)).getBoolean("valid")
     override suspend fun exchangeSession(id: String) = call("/v1/exchange/sessions/$id")
     override suspend fun changeExchange(id: String, revision: Int, state: String) =
         call("/v1/exchange/sessions/$id", json("expected_session_revision" to revision, "state" to state), "PUT")
@@ -187,7 +236,7 @@ class HttpSonarApi(
         })
     override suspend fun exchangeUpload(id: String, file: File, metadata: JSONObject): JSONObject =
         withContext(Dispatchers.IO) {
-            require(file.length() in 46..(300 * 1024)) { "录音大小无效" }
+            require(file.length() in 46..(1000 * 1024)) { "录音大小无效" }
             val body = MultipartBody.Builder().setType(MultipartBody.FORM)
                 .addFormDataPart("metadata", metadata.toString())
                 .addFormDataPart("audio", "voice.wav", file.readBytes().toRequestBody("audio/wav".toMediaType()))
@@ -198,7 +247,7 @@ class HttpSonarApi(
     override suspend fun upload(draft: LocalDraft): JSONObject =
         withContext(Dispatchers.IO) {
             val audio = File(draft.file).readBytes()
-            require(audio.size <= 300 * 1024) { "录音过长，请重新录制" }
+            require(audio.size <= 1000 * 1024) { "录音过长，请重新录制" }
             val body =
                 MultipartBody.Builder()
                     .setType(MultipartBody.FORM)
@@ -227,7 +276,7 @@ class HttpSonarApi(
 
     override suspend fun download(path: String): ByteArray =
         withContext(Dispatchers.IO) {
-            client.newCall(request(path).build()).execute().use { response ->
+            withResponse(request(path).build()) { response ->
                 if (!response.isSuccessful)
                     throw ApiFailure(response.code, "AUDIO_ERROR", "原声下载失败（${response.code}）")
                 val body = response.body ?: throw IOException("原声为空")
@@ -235,7 +284,7 @@ class HttpSonarApi(
                     java.io.ByteArrayOutputStream().use { output ->
                         body.byteStream().use { input ->
                             val buffer = ByteArray(4096)
-                            while (output.size() <= 300 * 1024) {
+                            while (output.size() <= 1000 * 1024) {
                                 val n = input.read(buffer)
                                 if (n < 0) break
                                 output.write(buffer, 0, n)
@@ -243,7 +292,7 @@ class HttpSonarApi(
                         }
                         output.toByteArray()
                     }
-                require(bytes.size <= 300 * 1024) { "音频超过大小限制" }
+                require(bytes.size <= 1000 * 1024) { "音频超过大小限制" }
                 require(
                     bytes.size > 44 && bytes.copyOfRange(0, 4).contentEquals("RIFF".toByteArray())
                 ) {

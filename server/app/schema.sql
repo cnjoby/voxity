@@ -1,4 +1,7 @@
 PRAGMA foreign_keys = ON;
+CREATE TABLE IF NOT EXISTS remote_place_choices (
+ user_id TEXT PRIMARY KEY REFERENCES users(id), place_id TEXT, selected_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS users (
  id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE,
  device_id TEXT NOT NULL UNIQUE, agent_id TEXT NOT NULL
@@ -34,6 +37,11 @@ CREATE INDEX IF NOT EXISTS question_deliveries ON deliveries(question_id);
 CREATE TABLE IF NOT EXISTS places (
  id TEXT PRIMARY KEY, label TEXT NOT NULL, latitude REAL NOT NULL,
  longitude REAL NOT NULL, kind TEXT NOT NULL, created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS place_parents (
+ child_id TEXT PRIMARY KEY REFERENCES places(id),
+ parent_id TEXT NOT NULL REFERENCES places(id), evidence TEXT NOT NULL,
+ CHECK(child_id != parent_id)
 );
 
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -80,7 +88,7 @@ CREATE TABLE IF NOT EXISTS exchange_sessions (
  auto_publish INTEGER NOT NULL, auto_play INTEGER NOT NULL,
  state TEXT NOT NULL DEFAULT 'active', revision INTEGER NOT NULL DEFAULT 1,
  created_at REAL NOT NULL, expires_at REAL NOT NULL,
- context_post_id TEXT REFERENCES posts(id),
+ context_post_id TEXT REFERENCES posts(id), capabilities_json TEXT,
  UNIQUE(user_id,client_request_id)
 );
 CREATE TABLE IF NOT EXISTS exchange_turns (
@@ -95,4 +103,73 @@ CREATE TABLE IF NOT EXISTS exchange_candidates (
  session_id TEXT NOT NULL REFERENCES exchange_sessions(id), post_id TEXT NOT NULL REFERENCES posts(id),
  profile_revision INTEGER NOT NULL, state TEXT NOT NULL, created_at REAL NOT NULL,
  PRIMARY KEY(session_id,post_id,profile_revision)
+);
+
+-- Private turn continuation, separate from public posts and physical presence.
+CREATE TABLE IF NOT EXISTS agent_pending (
+ session_id TEXT PRIMARY KEY REFERENCES exchange_sessions(id),
+ turn_id TEXT NOT NULL REFERENCES exchange_turns(id),
+ metadata_json TEXT NOT NULL, audio BLOB NOT NULL, plan_json TEXT NOT NULL,
+ expires_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS voice_sessions (
+ session_id TEXT PRIMARY KEY REFERENCES exchange_sessions(id),
+ policy_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS voice_preferences (
+ user_id TEXT PRIMARY KEY REFERENCES users(id), enabled INTEGER NOT NULL,
+ until_at REAL, session_id TEXT REFERENCES exchange_sessions(id)
+);
+CREATE TABLE IF NOT EXISTS user_destinations (
+ user_id TEXT NOT NULL REFERENCES users(id), alias TEXT NOT NULL,
+ place_id TEXT NOT NULL REFERENCES places(id), PRIMARY KEY(user_id,alias)
+);
+-- Mutual requests express chat willingness; assist_enabled is never reused for chat.
+CREATE TABLE IF NOT EXISTS chat_requests (
+ id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
+ session_id TEXT NOT NULL REFERENCES exchange_sessions(id),
+ state TEXT NOT NULL, peer_id TEXT REFERENCES chat_requests(id),
+ transcript TEXT NOT NULL, audio BLOB NOT NULL,
+ created_at REAL NOT NULL, expires_at REAL NOT NULL, seen_at REAL NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS one_open_chat ON chat_requests(user_id)
+ WHERE state IN ('waiting','paired','agent');
+CREATE TABLE IF NOT EXISTS chat_messages (
+ id TEXT PRIMARY KEY, request_id TEXT NOT NULL REFERENCES chat_requests(id),
+ author_id TEXT NOT NULL REFERENCES users(id), transcript TEXT NOT NULL,
+ audio BLOB NOT NULL, created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS chat_deliveries (
+ id TEXT PRIMARY KEY, recipient_id TEXT NOT NULL REFERENCES users(id),
+ message_id TEXT NOT NULL REFERENCES chat_messages(id),
+ request_id TEXT NOT NULL, profile_revision INTEGER NOT NULL,
+ state TEXT NOT NULL DEFAULT 'pending', expires_at REAL NOT NULL,
+ UNIQUE(recipient_id,message_id)
+);
+
+CREATE TABLE IF NOT EXISTS personal_tasks (
+ id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
+ request_id TEXT NOT NULL, session_id TEXT REFERENCES exchange_sessions(id),
+ question_id TEXT REFERENCES posts(id), conversation_id TEXT REFERENCES posts(id),
+ last_request_message_id TEXT REFERENCES posts(id),
+ kind TEXT NOT NULL, status TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1,
+ original_text TEXT NOT NULL, place_id TEXT, reason_code TEXT, result_json TEXT,
+ created_at REAL NOT NULL, updated_at REAL NOT NULL, expires_at REAL NOT NULL,
+ UNIQUE(user_id,request_id)
+);
+CREATE INDEX IF NOT EXISTS personal_task_owner ON personal_tasks(user_id,updated_at);
+CREATE INDEX IF NOT EXISTS personal_task_question ON personal_tasks(question_id,user_id);
+CREATE TABLE IF NOT EXISTS personal_task_turns (
+ task_id TEXT NOT NULL REFERENCES personal_tasks(id),
+ turn_id TEXT NOT NULL UNIQUE REFERENCES exchange_turns(id),
+ PRIMARY KEY(task_id,turn_id)
+);
+CREATE TABLE IF NOT EXISTS personal_task_commands (
+ user_id TEXT NOT NULL REFERENCES users(id), request_id TEXT NOT NULL,
+ task_id TEXT NOT NULL REFERENCES personal_tasks(id), fingerprint TEXT NOT NULL,
+ PRIMARY KEY(user_id,request_id)
+);
+CREATE TABLE IF NOT EXISTS question_routes (
+ question_id TEXT PRIMARY KEY REFERENCES posts(id), last_batch_at REAL NOT NULL,
+ policy_version TEXT NOT NULL DEFAULT '1'
 );

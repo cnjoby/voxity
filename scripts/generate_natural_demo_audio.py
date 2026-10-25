@@ -9,7 +9,7 @@ import wave
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-ASSETS = ROOT / "android/app/src/main/assets/demo"
+ASSETS = ROOT / "server/demo-assets"
 STAGING = ROOT / "output/natural-tts/conversational"
 MODEL = "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-6bit"
 REVISION = "1c6c0ff58c43afa8df571facde2efa077efd85e2"

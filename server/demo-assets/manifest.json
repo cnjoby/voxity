@@ -3,24 +3,24 @@
   "notice": "全部为合成测试内容，不代表真实公告、实时路况或现场人员发言。",
   "places": [
     {
-      "id": "demo:zhangjiang-jinke",
-      "label": "中环路金科路口",
-      "latitude": 31.173564,
-      "longitude": 121.602421,
+      "id": "B0FFHPHNSH",
+      "label": "华夏中路与金科路交叉口",
+      "latitude": 31.173934,
+      "longitude": 121.602353,
       "coordinate_system": "gcj02",
       "source": "高德地理编码：金科路/华夏中路，道路交叉路口，2026-10-24"
     },
     {
-      "id": "demo:ai-island-19",
-      "label": "人工智能岛19号楼附近",
-      "latitude": 31.18482,
-      "longitude": 121.609497,
+      "id": "B0FFJSBSGR",
+      "label": "上海七牛信息技术有限公司",
+      "latitude": 31.18498,
+      "longitude": 121.609005,
       "coordinate_system": "gcj02",
       "source": "高德地理编码：川和路55弄19号，门牌号，2026-10-24；仅作楼外附近锚点"
     },
     {
-      "id": "demo:modaily",
-      "label": "模力社区附近",
+      "id": "B0K2KHYN77",
+      "label": "模力社区",
       "latitude": 31.184698,
       "longitude": 121.617324,
       "coordinate_system": "gcj02",
@@ -30,7 +30,7 @@
   "clips": [
     {
       "id": "zhangjiang-jinke-01",
-      "place_id": "demo:zhangjiang-jinke",
+      "place_id": "B0FFHPHNSH",
       "category": "公告",
       "title": "路口提醒",
       "transcript": "过马路记得看灯啊，转弯的车也留意一下。",
@@ -51,7 +51,7 @@
     },
     {
       "id": "zhangjiang-jinke-02",
-      "place_id": "demo:zhangjiang-jinke",
+      "place_id": "B0FFHPHNSH",
       "category": "公告",
       "title": "道路养护",
       "transcript": "那边有人修绿化，咱们走人行道就行。",
@@ -72,7 +72,7 @@
     },
     {
       "id": "zhangjiang-jinke-03",
-      "place_id": "demo:zhangjiang-jinke",
+      "place_id": "B0FFHPHNSH",
       "category": "公告",
       "title": "文明停车",
       "transcript": "单车往旁边停一点吧，别把过街的路堵了。",
@@ -93,7 +93,7 @@
     },
     {
       "id": "zhangjiang-jinke-04",
-      "place_id": "demo:zhangjiang-jinke",
+      "place_id": "B0FFHPHNSH",
       "category": "公告",
       "title": "临时引导",
       "transcript": "前面辅路有引导牌，跟着现场指示走就行。",
@@ -114,7 +114,7 @@
     },
     {
       "id": "zhangjiang-jinke-05",
-      "place_id": "demo:zhangjiang-jinke",
+      "place_id": "B0FFHPHNSH",
       "category": "路况",
       "title": "排队缓行",
       "transcript": "金科路口有点排队，再等一个灯看看吧。",
@@ -135,7 +135,7 @@
     },
     {
       "id": "zhangjiang-jinke-06",
-      "place_id": "demo:zhangjiang-jinke",
+      "place_id": "B0FFHPHNSH",
       "category": "路况",
       "title": "车辆较少",
       "transcript": "我这边车还不多，对面怎么样我没看清。",
@@ -156,7 +156,7 @@
     },
     {
       "id": "zhangjiang-jinke-07",
-      "place_id": "demo:zhangjiang-jinke",
+      "place_id": "B0FFHPHNSH",
       "category": "路况",
       "title": "匝道观察",
       "transcript": "匝道口走得有点慢，主路上我还不清楚。",
@@ -177,7 +177,7 @@
     },
     {
       "id": "zhangjiang-jinke-08",
-      "place_id": "demo:zhangjiang-jinke",
+      "place_id": "B0FFHPHNSH",
       "category": "路况",
       "title": "行人较多",
       "transcript": "这会儿过马路的人挺多，转弯慢一点啊。",
@@ -198,7 +198,7 @@
     },
     {
       "id": "zhangjiang-jinke-09",
-      "place_id": "demo:zhangjiang-jinke",
+      "place_id": "B0FFHPHNSH",
       "category": "闲聊",
       "title": "下班散步",
       "transcript": "刚下班走到金科路，有人一起散个步吗？",
@@ -219,7 +219,7 @@
     },
     {
       "id": "zhangjiang-jinke-10",
-      "place_id": "demo:zhangjiang-jinke",
+      "place_id": "B0FFHPHNSH",
       "category": "闲聊",
       "title": "咖啡搭子",
       "transcript": "想在附近喝杯咖啡，有没有人一起啊？",
@@ -240,7 +240,7 @@
     },
     {
       "id": "zhangjiang-jinke-11",
-      "place_id": "demo:zhangjiang-jinke",
+      "place_id": "B0FFHPHNSH",
       "category": "闲聊",
       "title": "周末骑行",
       "transcript": "周末想在张江骑骑车，有啥路线推荐吗？",
@@ -261,7 +261,7 @@
     },
     {
       "id": "zhangjiang-jinke-12",
-      "place_id": "demo:zhangjiang-jinke",
+      "place_id": "B0FFHPHNSH",
       "category": "闲聊",
       "title": "城市夜色",
       "transcript": "终于忙完了，出来看看夜景，舒服多了。",
@@ -282,7 +282,7 @@
     },
     {
       "id": "ai-island-19-01",
-      "place_id": "demo:ai-island-19",
+      "place_id": "B0FFJSBSGR",
       "category": "公告",
       "title": "访客登记",
       "transcript": "第一次来十九号楼的话，先登记一下哈。",
@@ -303,7 +303,7 @@
     },
     {
       "id": "ai-island-19-02",
-      "place_id": "demo:ai-island-19",
+      "place_id": "B0FFJSBSGR",
       "category": "公告",
       "title": "活动签到",
       "transcript": "十九号楼这边开始签到了，大家慢慢来。",
@@ -324,7 +324,7 @@
     },
     {
       "id": "ai-island-19-03",
-      "place_id": "demo:ai-island-19",
+      "place_id": "B0FFJSBSGR",
       "category": "公告",
       "title": "保持安静",
       "transcript": "里面还在开会，咱们说话稍微轻一点哈。",
@@ -345,7 +345,7 @@
     },
     {
       "id": "ai-island-19-04",
-      "place_id": "demo:ai-island-19",
+      "place_id": "B0FFJSBSGR",
       "category": "公告",
       "title": "设备演示",
       "transcript": "门口有个设备演示，别把出入口挡住就好。",
@@ -366,7 +366,7 @@
     },
     {
       "id": "ai-island-19-05",
-      "place_id": "demo:ai-island-19",
+      "place_id": "B0FFJSBSGR",
       "category": "路况",
       "title": "园区慢行",
       "transcript": "十九号楼这边人挺多，开车稍微慢一点。",
@@ -387,7 +387,7 @@
     },
     {
       "id": "ai-island-19-06",
-      "place_id": "demo:ai-island-19",
+      "place_id": "B0FFJSBSGR",
       "category": "路况",
       "title": "门口接送",
       "transcript": "门口有车在接人，咱们往前走两步再上车吧。",
@@ -408,7 +408,7 @@
     },
     {
       "id": "ai-island-19-07",
-      "place_id": "demo:ai-island-19",
+      "place_id": "B0FFJSBSGR",
       "category": "路况",
       "title": "停车排队",
       "transcript": "停车入口排了几辆，里面还有没有位我得问问。",
@@ -429,7 +429,7 @@
     },
     {
       "id": "ai-island-19-08",
-      "place_id": "demo:ai-island-19",
+      "place_id": "B0FFJSBSGR",
       "category": "路况",
       "title": "步道通行",
       "transcript": "楼旁边这条小路能走，车道那边我没看。",
@@ -450,7 +450,7 @@
     },
     {
       "id": "ai-island-19-09",
-      "place_id": "demo:ai-island-19",
+      "place_id": "B0FFJSBSGR",
       "category": "闲聊",
       "title": "寻找同行",
       "transcript": "我在十九号楼附近，有人也在做语音应用吗？",
@@ -471,7 +471,7 @@
     },
     {
       "id": "ai-island-19-10",
-      "place_id": "demo:ai-island-19",
+      "place_id": "B0FFJSBSGR",
       "category": "闲聊",
       "title": "午间休息",
       "transcript": "写了一上午代码，出来吹吹风，清醒多了。",
@@ -492,7 +492,7 @@
     },
     {
       "id": "ai-island-19-11",
-      "place_id": "demo:ai-island-19",
+      "place_id": "B0FFJSBSGR",
       "category": "闲聊",
       "title": "演示交流",
       "transcript": "我做了个小演示，有没有人愿意帮我试试？",
@@ -513,7 +513,7 @@
     },
     {
       "id": "ai-island-19-12",
-      "place_id": "demo:ai-island-19",
+      "place_id": "B0FFJSBSGR",
       "category": "闲聊",
       "title": "今天的收获",
       "transcript": "今天总算把那个功能跑通了，真的挺开心。",
@@ -534,7 +534,7 @@
     },
     {
       "id": "modaily-01",
-      "place_id": "demo:modaily",
+      "place_id": "B0K2KHYN77",
       "category": "公告",
       "title": "社区活动",
       "transcript": "模力社区那场分享快开始了，记得去签到哈。",
@@ -555,7 +555,7 @@
     },
     {
       "id": "modaily-02",
-      "place_id": "demo:modaily",
+      "place_id": "B0K2KHYN77",
       "category": "公告",
       "title": "共享空间",
       "transcript": "桌子用完帮忙收拾一下呗，东西也别落下。",
@@ -576,7 +576,7 @@
     },
     {
       "id": "modaily-03",
-      "place_id": "demo:modaily",
+      "place_id": "B0K2KHYN77",
       "category": "公告",
       "title": "访客指引",
       "transcript": "第一次过来的话，先问一下要去哪栋楼。",
@@ -597,7 +597,7 @@
     },
     {
       "id": "modaily-04",
-      "place_id": "demo:modaily",
+      "place_id": "B0K2KHYN77",
       "category": "公告",
       "title": "音量提醒",
       "transcript": "这边还有人在办公，咱们声音稍微小一点哈。",
@@ -618,7 +618,7 @@
     },
     {
       "id": "modaily-05",
-      "place_id": "demo:modaily",
+      "place_id": "B0K2KHYN77",
       "category": "路况",
       "title": "入口慢行",
       "transcript": "入口这儿有车进出，走过去的时候看一眼啊。",
@@ -639,7 +639,7 @@
     },
     {
       "id": "modaily-06",
-      "place_id": "demo:modaily",
+      "place_id": "B0K2KHYN77",
       "category": "路况",
       "title": "接送高峰",
       "transcript": "门口接人的车有点多，咱找个能等的地方吧。",
@@ -660,7 +660,7 @@
     },
     {
       "id": "modaily-07",
-      "place_id": "demo:modaily",
+      "place_id": "B0K2KHYN77",
       "category": "路况",
       "title": "骑行提醒",
       "transcript": "这边骑车的人挺多，拐弯的时候慢一点哈。",
@@ -681,7 +681,7 @@
     },
     {
       "id": "modaily-08",
-      "place_id": "demo:modaily",
+      "place_id": "B0K2KHYN77",
       "category": "路况",
       "title": "停车询问",
       "transcript": "入口现在还挺顺的，车位剩多少得问一下。",
@@ -702,7 +702,7 @@
     },
     {
       "id": "modaily-09",
-      "place_id": "demo:modaily",
+      "place_id": "B0K2KHYN77",
       "category": "闲聊",
       "title": "模型交流",
       "transcript": "有人在做端侧模型吗？想聊聊推理速度。",
@@ -723,7 +723,7 @@
     },
     {
       "id": "modaily-10",
-      "place_id": "demo:modaily",
+      "place_id": "B0K2KHYN77",
       "category": "闲聊",
       "title": "找午饭搭子",
       "transcript": "中午还没吃呢，有没有人一起去吃个饭？",
@@ -744,7 +744,7 @@
     },
     {
       "id": "modaily-11",
-      "place_id": "demo:modaily",
+      "place_id": "B0K2KHYN77",
       "category": "闲聊",
       "title": "周末项目",
       "transcript": "周末做了个语音小工具，想找人帮我试试。",
@@ -765,7 +765,7 @@
     },
     {
       "id": "modaily-12",
-      "place_id": "demo:modaily",
+      "place_id": "B0K2KHYN77",
       "category": "闲聊",
       "title": "认识邻居",
       "transcript": "刚搬来这边，想认识几个做产品的朋友。",

@@ -71,10 +71,10 @@ def test_draft_privacy_idempotency_and_format(env):
     assert c.get(f"/v1/audio/{pid}", headers=auth("bob")).status_code == 404
     assert c.post(f"/v1/posts/{pid}/confirm", headers=auth("bob"), json={}).status_code == 404
     assert c.get("/v1/inbox", headers=auth("bob")).json()["items"] == []
-    for audio in [b"opus", wav(rate=8000), wav(seconds=8.01), wav()[:-10]]:
+    for audio in [b"opus", wav(rate=8000), wav(seconds=30.01), wav()[:-10]]:
         assert draft(c, audio=audio).status_code == 415
-    assert draft(c, audio=b"x" * (301 * 1024)).status_code == 413
-    assert draft(c, audio=b"x" * (360 * 1024)).status_code == 413
+    assert draft(c, audio=b"x" * (1001 * 1024)).status_code == 413
+    assert draft(c, audio=b"x" * (1025 * 1024)).status_code == 413
     assert draft(c, metadata={**meta, "user_id": "bob"}).status_code == 422
     assert draft(c, metadata={**meta, "transcript": " "}).status_code == 422
 
@@ -134,7 +134,7 @@ def test_late_answer_not_published(env, action):
         for _ in range(2):
             assert c.post(f"/v1/questions/{qid}/cancel", headers=auth(), json={}).status_code == 200
     else:
-        now[0] += 31 if action == "timeout" else 601
+        now[0] += 91 if action == "timeout" else 601
     assert c.post(f"/v1/posts/{pid}/confirm", headers=auth("bob"), json={}).status_code in (
         409,
         410,

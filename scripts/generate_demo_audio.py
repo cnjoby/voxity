@@ -9,7 +9,7 @@ import wave
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-ASSETS = ROOT / "android/app/src/main/assets/demo"
+ASSETS = ROOT / "server/demo-assets"
 VOICES = [
     "Tingting",
     "Eddy (中文（中国大陆）)",

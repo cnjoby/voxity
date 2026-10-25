@@ -90,3 +90,29 @@ def test_voice_refresh_retires_only_prior_generated_fixtures(env, tmp_path):
             items = s.catalog(db, "alice", place["id"])["items"]
             assert len(items) == 12
             assert not old_ids.intersection(item["post_id"] for item in items)
+
+
+def test_shared_fixtures_are_persistent_visible_to_other_users_and_never_live_evidence(env):
+    c, service, now, _ = env
+    assert import_demo(service) == 36
+    assert import_demo(service, shared=True) == 36
+    assert import_demo(service, shared=True) == 0
+    now[0] += 2 * 86400
+    for user in ("alice", "bob"):
+        items = c.get("/v1/voices", params={"place_id": "B0K2KHYN77"}, headers=auth(user)).json()[
+            "items"
+        ]
+        assert len(items) == 12
+        assert all(p["synthetic"] and p["content_origin"] == "agent_synthesized" for p in items)
+        assert all("合成测试" in p["author_label"] for p in items)
+        for item in items:
+            assert c.get(item["audio_url"], headers=auth(user)).status_code == 200
+            view = c.get("/v1/messages/" + item["post_id"], headers=auth(user)).json()["message"]
+            assert view["body"]["content_origin"] == "agent_synthesized"
+        with service.scope() as db:
+            assert not service.find_information(db, user, "B0K2KHYN77", purpose="parking")["items"]
+            assert not service.find_information(db, user, "B0K2KHYN77", purpose="route")["items"]
+            assert all(
+                not service.automatic_voice(db, user, service.post(db, p["post_id"]), {})
+                for p in items
+            )

@@ -126,8 +126,14 @@ class VoiceRules:
         return q["published_at"] + self.settings.audio_ttl
 
     def thread_open(self, db, q):
-        return self.thread_deadline(db, q) > self.clock() and (
-            self.voice_live(db, q) if q["kind"] == "scene" else q["question_status"] == "answered"
+        return (
+            not self.conversation_task_closed(db, q)
+            and self.thread_deadline(db, q) > self.clock()
+            and (
+                self.voice_live(db, q)
+                if q["kind"] == "scene"
+                else q["question_status"] == "answered"
+            )
         )
 
     def check_reply(self, db, user, fields):
@@ -187,7 +193,19 @@ class VoiceRules:
         if fields["scope"] != "poi" and not fields.get("scope_label"):
             raise Problem(422, "SCOPE_REQUIRED", "请注明入口、楼层或区域")
         dynamic = kind == "announcement" or purpose == "observation"
-        if dynamic:
+        standing = fields.get("validity_policy") == "until_withdrawn"
+        if standing and (
+            kind != "announcement"
+            or start is None
+            or end is not None
+            or not fields.get("source_note")
+        ):
+            raise Problem(
+                422,
+                "STANDING_NOTICE_INVALID",
+                "长期须知仅限授权公告，需生效时间、来源说明且不设失效时间",
+            )
+        if dynamic and not standing:
             maximum = (
                 self.settings.announcement_max_ttl
                 if kind == "announcement"
@@ -306,6 +324,7 @@ class VoiceRules:
                     d["id"],
                 ),
             )
+        self.task_on_message(db, self.post(db, p["id"]))
         return self.voice_confirm_result(db, self.post(db, p["id"]))
 
     def voice_confirm_result(self, db, p):
@@ -367,21 +386,28 @@ class VoiceRules:
             or p["target_latitude"] is None
         ):
             return False
-        if profile["source"] not in ("android", "android_mock") or (
-            profile["source"] == "android_mock" and not self.settings.allow_mock_location
-        ):
+        if (
+            profile["source"] not in ("android", "android_mock")
+            and not self.is_remote_place(profile)
+        ) or (profile["source"] == "android_mock" and not self.settings.allow_mock_location):
             return False
         return (
             profile["sampled_at"] + self.settings.location_ttl > self.clock()
             and profile["accuracy_m"] <= self.settings.location_accuracy_m
-            and distance_m(
-                profile["latitude"],
-                profile["longitude"],
-                p["target_latitude"],
-                p["target_longitude"],
+            and (
+                (
+                    (p["kind"] if "kind" in p.keys() else None) == "question"
+                    and bool(self.shared_park(db, profile["place_id"], p["target_place_id"]))
+                )
+                or distance_m(
+                    profile["latitude"],
+                    profile["longitude"],
+                    p["target_latitude"],
+                    p["target_longitude"],
+                )
+                + profile["accuracy_m"]
+                <= self.settings.voice_radius_m
             )
-            + profile["accuracy_m"]
-            <= self.settings.voice_radius_m
         )
 
     def visit(self, db, user, p, near):
@@ -414,6 +440,8 @@ class VoiceRules:
         ).fetchone()
 
     def automatic_voice(self, db, user, p, meta):
+        if p["author_id"] == "synthetic_audio_test":
+            return False
         prefs = self.listening(db, user)
         if meta.get("applicability") == "unknown":
             return False
@@ -501,6 +529,9 @@ class VoiceRules:
                 )
 
     def voice_delivery_gate(self, db, user, d, p):
+        task_gate = self.task_delivery_gate(db, d)
+        if task_gate:
+            return task_gate
         data = json.loads(d["voice_json"] or "{}")
         meta, _ = self.voice_meta(db, p["id"])
         prefs = self.listening(db, user)
@@ -511,9 +542,13 @@ class VoiceRules:
                 session = self.require_exchange(db, user, data["exchange_session_id"], play=True)
             except (Problem, KeyError):
                 return "EXCHANGE_INACTIVE"
-            if p["target_place_id"] != session["place_id"] or not self.physically_near(
-                db, user, p, meta or {}
-            ):
+            if (
+                p["target_place_id"] != session["place_id"]
+                and not (
+                    p["kind"] == "question"
+                    and self.shared_park(db, session["place_id"], p["target_place_id"])
+                )
+            ) or not self.physically_near(db, user, p, meta or {}):
                 return "OUTSIDE_SCOPE"
             if (
                 data.get("exchange_context_post_id") != session["context_post_id"]
@@ -573,6 +608,8 @@ class VoiceRules:
                         "scope_label",
                         "valid_from",
                         "valid_until",
+                        "validity_policy",
+                        "content_origin",
                         "applicability",
                         "source_note",
                         "topics",
@@ -615,15 +652,27 @@ class VoiceRules:
                     "recipient_id": self.post(db, p["reply_to"])["author_id"],
                 }
             )
+        if meta and meta.get("content_origin") == "agent_synthesized":
+            payload.update(synthetic=True, content_origin="agent_synthesized")
+        if p["author_id"] == "synthetic_audio_test":
+            payload.update(
+                synthetic=True,
+                content_origin="agent_synthesized",
+                author_label="合成测试音频",
+                source_type="synthetic_test",
+                context_note="合成测试内容，不代表实时公告、路况或真人发言",
+            )
         return payload
 
     def catalog(self, db, user, place):
         channels = self.channels_for(db, user, place)
-        rows = db.execute(
-            "SELECT p.* FROM posts p JOIN voice_details v ON p.id=v.post_id WHERE p.target_place_id=? AND p.status='published' AND p.kind IN ('scene','knowledge','announcement') ORDER BY p.published_at DESC,p.id",
-            (place,),
-        ).fetchall()
-        items = [self.voice_payload(db, p) for p in rows if self.voice_live(db, p)]
+        items = [
+            p
+            for p in self.find_information(
+                db, user, place, limit=100, kinds=("scene", "knowledge", "announcement")
+            )["items"]
+            if p["kind"] in ("scene", "knowledge", "announcement")
+        ]
         return {
             "items": items,
             "channels": channels,

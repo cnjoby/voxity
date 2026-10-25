@@ -56,7 +56,7 @@ def test_feed_queue_revision_scope_expiry_and_restart(env):
             raise AssertionError("expected rejection")
         except Problem as exc:
             assert exc.code == "REVISION_CONFLICT"
-    now[0] += 31
+    now[0] += 91
     with service.scope() as db:
         try:
             service.queue_voice(db, "alice", **kwargs)
@@ -116,10 +116,21 @@ def test_official_sdk_over_real_sse_and_session_isolation(env):
                         "get_feed",
                         "set_focus",
                         "queue_voice",
+                        "find_places",
+                        "get_place_weather",
+                        "get_driving_route",
+                        "agent_turn",
+                        "find_information",
+                        "get_tasks",
+                        "get_request",
+                        "set_task_state",
                     }
                     for name, args in [
                         ("probe", {}),
                         ("get_feed", {}),
+                        ("find_places", {"query": "张江人工智能岛"}),
+                        ("get_place_weather", {"place_id": "some-place"}),
+                        ("get_driving_route", {"place_id": "some-place"}),
                         ("set_focus", {"expected_revision": 1, "mode": "quiet"}),
                         (
                             "queue_voice",
@@ -140,6 +151,14 @@ def test_official_sdk_over_real_sse_and_session_isolation(env):
                         "get_feed",
                         "set_focus",
                         "queue_voice",
+                        "find_places",
+                        "get_place_weather",
+                        "get_driving_route",
+                        "agent_turn",
+                        "find_information",
+                        "get_tasks",
+                        "get_request",
+                        "set_task_state",
                     }
                     probe = await session.call_tool("probe", {})
                     assert probe.structuredContent["user_id"] == "alice"
@@ -171,7 +190,7 @@ def test_official_sdk_over_real_sse_and_session_isolation(env):
                     ):
                         async with ClientSession(read, write) as session:
                             await session.initialize()
-                            assert len((await session.list_tools()).tools) == 4
+                            assert len((await session.list_tools()).tools) == 12
                             result = await session.call_tool("probe", {})
                             if uid is None:
                                 assert result.isError

@@ -83,7 +83,7 @@ class LinxSession(
         }
         val bytes = file.readBytes()
         require(
-            bytes.size in 46..(300 * 1024) &&
+            bytes.size in 46..(1000 * 1024) &&
                 String(bytes, 0, 4) == "RIFF" &&
                 String(bytes, 8, 4) == "WAVE" &&
                 String(bytes, 36, 4) == "data"

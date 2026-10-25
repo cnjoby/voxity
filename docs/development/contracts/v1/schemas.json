@@ -1,0 +1,712 @@
+{
+  "VoiceMessageView": {
+    "$defs": {
+      "MessageBody": {
+        "additionalProperties": false,
+        "properties": {
+          "audio_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Audio Ref"
+          },
+          "transcript": {
+            "title": "Transcript",
+            "type": "string"
+          },
+          "transcript_revision": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Transcript Revision",
+            "type": "integer"
+          },
+          "content_origin": {
+            "enum": [
+              "human_original",
+              "agent_synthesized",
+              "derived_summary"
+            ],
+            "title": "Content Origin",
+            "type": "string"
+          },
+          "source_refs": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Source Refs",
+            "type": "array"
+          }
+        },
+        "required": [
+          "transcript",
+          "content_origin"
+        ],
+        "title": "MessageBody",
+        "type": "object"
+      },
+      "MessageEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "event_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Event Id"
+          },
+          "event_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Event Type"
+          },
+          "claim": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Claim"
+          },
+          "relation": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Relation"
+          }
+        },
+        "title": "MessageEvent",
+        "type": "object"
+      },
+      "MessagePlace": {
+        "additionalProperties": false,
+        "properties": {
+          "about_place_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "About Place Id"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Label"
+          },
+          "scope": {
+            "default": "unknown",
+            "enum": [
+              "poi",
+              "entrance",
+              "floor",
+              "area",
+              "unknown"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "scope_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Scope Label"
+          },
+          "direction": {
+            "default": "unknown",
+            "title": "Direction",
+            "type": "string"
+          },
+          "recorded_location_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Recorded Location Ref"
+          }
+        },
+        "title": "MessagePlace",
+        "type": "object"
+      },
+      "MessageState": {
+        "additionalProperties": false,
+        "properties": {
+          "publication": {
+            "enum": [
+              "draft",
+              "published",
+              "withdrawn",
+              "replaced"
+            ],
+            "title": "Publication",
+            "type": "string"
+          },
+          "applicability": {
+            "enum": [
+              "not_started",
+              "valid",
+              "expired",
+              "unknown"
+            ],
+            "title": "Applicability",
+            "type": "string"
+          },
+          "event": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Event"
+          },
+          "task": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Task"
+          },
+          "delivery": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Delivery"
+          },
+          "moderation": {
+            "default": "not_evaluated",
+            "enum": [
+              "not_evaluated",
+              "allowed",
+              "blocked",
+              "review"
+            ],
+            "title": "Moderation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "publication",
+          "applicability"
+        ],
+        "title": "MessageState",
+        "type": "object"
+      },
+      "MessageSubject": {
+        "additionalProperties": false,
+        "properties": {
+          "author_id": {
+            "title": "Author Id",
+            "type": "string"
+          },
+          "principal_id": {
+            "title": "Principal Id",
+            "type": "string"
+          },
+          "acting_agent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Acting Agent Id"
+          },
+          "source_type": {
+            "enum": [
+              "personal",
+              "poi_operator",
+              "external_tool"
+            ],
+            "title": "Source Type",
+            "type": "string"
+          },
+          "channel_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Channel Id"
+          },
+          "mentioned_entities": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Mentioned Entities",
+            "type": "array"
+          }
+        },
+        "required": [
+          "author_id",
+          "principal_id",
+          "source_type"
+        ],
+        "title": "MessageSubject",
+        "type": "object"
+      },
+      "MessageTime": {
+        "additionalProperties": false,
+        "properties": {
+          "observed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Observed At"
+          },
+          "recorded_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Recorded At"
+          },
+          "published_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Published At"
+          },
+          "collected_at": {
+            "format": "date-time",
+            "title": "Collected At",
+            "type": "string"
+          },
+          "valid_from": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Valid From"
+          },
+          "valid_until": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Valid Until"
+          }
+        },
+        "required": [
+          "collected_at"
+        ],
+        "title": "MessageTime",
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "schema_version": {
+        "const": "1",
+        "default": "1",
+        "title": "Schema Version",
+        "type": "string"
+      },
+      "message_id": {
+        "title": "Message Id",
+        "type": "string"
+      },
+      "kind": {
+        "enum": [
+          "question",
+          "answer",
+          "scene",
+          "knowledge",
+          "announcement",
+          "reply",
+          "chat"
+        ],
+        "title": "Kind",
+        "type": "string"
+      },
+      "time": {
+        "$ref": "#/$defs/MessageTime"
+      },
+      "place": {
+        "$ref": "#/$defs/MessagePlace"
+      },
+      "subject": {
+        "$ref": "#/$defs/MessageSubject"
+      },
+      "event": {
+        "$ref": "#/$defs/MessageEvent"
+      },
+      "body": {
+        "$ref": "#/$defs/MessageBody"
+      },
+      "state": {
+        "$ref": "#/$defs/MessageState"
+      },
+      "visibility": {
+        "enum": [
+          "public",
+          "participants"
+        ],
+        "title": "Visibility",
+        "type": "string"
+      },
+      "recipient_ids": {
+        "items": {
+          "type": "string"
+        },
+        "title": "Recipient Ids",
+        "type": "array"
+      },
+      "conversation_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Conversation Id"
+      },
+      "reply_to_message_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Reply To Message Id"
+      },
+      "original_request_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Original Request Id"
+      },
+      "replaces_message_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Replaces Message Id"
+      }
+    },
+    "required": [
+      "message_id",
+      "kind",
+      "time",
+      "place",
+      "subject",
+      "body",
+      "state",
+      "visibility"
+    ],
+    "title": "VoiceMessageView",
+    "type": "object"
+  },
+  "AgentTurnResult": {
+    "$defs": {
+      "AgentResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "speaker": {
+            "const": "agent",
+            "default": "agent",
+            "title": "Speaker",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "sources": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Sources",
+            "type": "array"
+          }
+        },
+        "required": [
+          "kind",
+          "text"
+        ],
+        "title": "AgentResponse",
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "schema_version": {
+        "const": "1",
+        "default": "1",
+        "title": "Schema Version",
+        "type": "string"
+      },
+      "turn_id": {
+        "title": "Turn Id",
+        "type": "string"
+      },
+      "outcome": {
+        "enum": [
+          "processing",
+          "information",
+          "clarification",
+          "human_request",
+          "published",
+          "private_chat",
+          "human_chat",
+          "ignored",
+          "deferred",
+          "unknown"
+        ],
+        "title": "Outcome",
+        "type": "string"
+      },
+      "reason": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Reason"
+      },
+      "message_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Message Id"
+      },
+      "conversation_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Conversation Id"
+      },
+      "chat_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Chat Id"
+      },
+      "response": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/AgentResponse"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "target_place": {
+        "anyOf": [
+          {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Target Place"
+      },
+      "server_time": {
+        "format": "date-time",
+        "title": "Server Time",
+        "type": "string"
+      }
+    },
+    "required": [
+      "turn_id",
+      "outcome",
+      "server_time"
+    ],
+    "title": "AgentTurnResult",
+    "type": "object"
+  },
+  "SessionCapabilities": {
+    "additionalProperties": false,
+    "properties": {
+      "schema_version": {
+        "const": "1",
+        "default": "1",
+        "title": "Schema Version",
+        "type": "string"
+      },
+      "private_query": {
+        "default": false,
+        "title": "Private Query",
+        "type": "boolean"
+      },
+      "request_humans": {
+        "default": false,
+        "title": "Request Humans",
+        "type": "boolean"
+      },
+      "publish_scene": {
+        "default": false,
+        "title": "Publish Scene",
+        "type": "boolean"
+      },
+      "reply_thread": {
+        "default": false,
+        "title": "Reply Thread",
+        "type": "boolean"
+      },
+      "match_chat": {
+        "default": false,
+        "title": "Match Chat",
+        "type": "boolean"
+      },
+      "auto_play": {
+        "default": false,
+        "title": "Auto Play",
+        "type": "boolean"
+      }
+    },
+    "title": "SessionCapabilities",
+    "type": "object"
+  }
+}

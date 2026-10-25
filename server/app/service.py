@@ -1,7 +1,8 @@
 import json
 import secrets
 import time
-from contextlib import contextmanager
+import wave
+from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime
 
 from .audio import validate_wav
@@ -10,8 +11,13 @@ from .decision import BambooDecision
 from .errors import Problem
 from .exchange import ExchangeDecider, ExchangeRules
 from .geo import AMap, distance_m, sampled_epoch
+from .information import InformationRules
+from .message_views import MessageViews
 from .models import AnswerDraft, Context, QuestionDraft, ReplyDraft, VoiceDraft
+from .remote_places import RemotePlaceRules
 from .storage import Database, digest
+from .tasks import TaskRules
+from .voice_first import VoiceIntentDecider
 from .voices import VoiceRules
 
 
@@ -27,7 +33,9 @@ def ident(prefix):
     return f"{prefix}_{secrets.token_hex(12)}"
 
 
-class Service(ExchangeRules, VoiceRules):
+class Service(
+    RemotePlaceRules, ExchangeRules, VoiceRules, MessageViews, InformationRules, TaskRules
+):
     def __init__(self, settings: Settings, clock=time.time):
         self.settings = settings
         self.clock = clock
@@ -36,11 +44,20 @@ class Service(ExchangeRules, VoiceRules):
         self.geo = AMap(settings.amap_key)
         self.decider = BambooDecision(settings.bamboo_api_key, settings.bamboo_base_url)
         self.exchange_decider = ExchangeDecider(settings)
+        self.voice_intent = VoiceIntentDecider(settings)
         self.migrate_legacy_focus()
+        self.migrate_personal_tasks()
+        self.register_pilot_places()
 
     @contextmanager
     def scope(self):
         with self.store.transaction() as db:
+            self.expire(db)
+            yield db
+
+    @asynccontextmanager
+    async def async_scope(self):
+        async with self.store.async_transaction() as db:
             self.expire(db)
             yield db
 
@@ -75,9 +92,13 @@ class Service(ExchangeRules, VoiceRules):
                 "Provide distinct SONAR_ALICE_TOKEN / SONAR_BOB_TOKEN of at least 32 characters"
             )
         with self.scope() as db:
+            db.execute(
+                "INSERT OR IGNORE INTO places VALUES (?,?,?,?,?,?)",
+                ("private:unlocated", "位置待更新", 0, 0, "area", self.clock()),
+            )
             for user, token, device, agent, place in [
-                ("alice", s.alice_token, s.alice_device_id, s.alice_agent_id, "demo_approach"),
-                ("bob", s.bob_token, s.bob_device_id, s.bob_agent_id, "zhonghuan_jinke"),
+                ("alice", s.alice_token, s.alice_device_id, s.alice_agent_id, "private:unlocated"),
+                ("bob", s.bob_token, s.bob_device_id, s.bob_agent_id, "private:unlocated"),
             ]:
                 db.execute(
                     "INSERT INTO users VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET token_hash=excluded.token_hash, device_id=excluded.device_id, agent_id=excluded.agent_id",
@@ -88,8 +109,8 @@ class Service(ExchangeRules, VoiceRules):
                     (
                         user,
                         place,
-                        "demo_exit",
-                        "simulated",
+                        "unknown",
+                        "unavailable",
                         self.clock(),
                         1,
                         "listen",
@@ -119,6 +140,7 @@ class Service(ExchangeRules, VoiceRules):
                 "place_id": p["place_id"],
                 "direction": p["direction"],
                 "source": p["source"],
+                **({"remote": True} if self.is_remote_place(p) else {}),
                 "updated_at": stamp(p["updated_at"]),
                 **(
                     {
@@ -137,6 +159,12 @@ class Service(ExchangeRules, VoiceRules):
         }
 
     def me(self, db, user):
+        pinned = self.remote_place_pin(db, user)
+        if pinned:
+            data, resolved = self.remote_location(
+                db, pinned, self.profile_row(db, user)["revision"]
+            )
+            self.update_location(db, user, data, resolved)
         u = db.execute("SELECT * FROM users WHERE id=?", (user,)).fetchone()
         ids = db.execute(
             "SELECT id FROM posts WHERE author_id=? AND kind='question' AND status='published' ORDER BY created_at DESC, id DESC LIMIT 10",
@@ -147,6 +175,7 @@ class Service(ExchangeRules, VoiceRules):
             "device_id": u["device_id"],
             "linx_agent_id": u["agent_id"],
             "recent_question_ids": [p["id"] for p in ids],
+            "place_shortcuts": self.place_shortcuts(db),
             **self.now(),
         }
 
@@ -160,6 +189,14 @@ class Service(ExchangeRules, VoiceRules):
             raise Problem(422, "LOCATION_STALE", "定位已过期，请重新定位")
 
     def update_location(self, db, user, data, resolved):
+        pinned = self.remote_place_pin(db, user)
+        if pinned:
+            data, resolved = self.remote_location(db, pinned, data.expected_revision)
+        elif not data.location or data.location.source != "remote_place":
+            db.execute(
+                "UPDATE remote_place_choices SET place_id=NULL,selected_at=? WHERE user_id=?",
+                (self.clock(), user),
+            )
         old = self.profile_row(db, user)
         if old["revision"] != data.expected_revision:
             raise Problem(409, "REVISION_CONFLICT", "设置已更新，请重试定位")
@@ -205,6 +242,26 @@ class Service(ExchangeRules, VoiceRules):
         )
         # Same immutable delivery content; location is revalidated before any playback.
         if changed:
+            # Session location is the caller's conversational "here", never a question's
+            # destination. Following GPS or a remote-place change must not retain the old here.
+            here = place_id if data.location else "private:unlocated"
+            db.execute(
+                "INSERT OR IGNORE INTO places VALUES (?,?,?,?,?,?)",
+                ("private:unlocated", "位置待更新", 0, 0, "area", self.clock()),
+            )
+            sessions = db.execute(
+                "SELECT s.* FROM exchange_sessions s JOIN voice_sessions v ON v.session_id=s.id "
+                "WHERE s.user_id=? AND s.state!='ended'",
+                (user,),
+            ).fetchall()
+            for session in sessions:
+                db.execute(
+                    "UPDATE exchange_sessions SET place_id=?,context_post_id=NULL,revision=revision+1 WHERE id=?",
+                    (here, session["id"]),
+                )
+                policy = self.voice_policy(db, session)
+                policy.update(heard_post_id=None, heard_at=0)
+                self.save_voice_policy(db, session["id"], policy)
             db.execute(
                 "UPDATE deliveries SET profile_revision=? WHERE recipient_id=? AND state IN ('pending','prompted')",
                 (revision, user),
@@ -218,20 +275,11 @@ class Service(ExchangeRules, VoiceRules):
         }
 
     def invite_nearby(self, db, user):
-        profile = self.profile_row(db, user)
         for q in db.execute(
             "SELECT * FROM posts WHERE question_status='waiting' AND author_id!=? AND target_latitude IS NOT NULL",
             (user,),
         ).fetchall():
-            if self.eligibility(profile, q) == "ELIGIBLE":
-                self.create_delivery(
-                    db,
-                    user,
-                    q["id"],
-                    q["id"],
-                    "invitation",
-                    min(q["expires_at"], self.clock() + self.settings.invitation_ttl),
-                )
+            self.route_question(db, q)
 
     def context(self, db, user, data: Context, refresh_presence=True):
         old = self.profile(db, user)
@@ -270,6 +318,16 @@ class Service(ExchangeRules, VoiceRules):
                 (user,),
             )
         if changed:
+            focus_only = (
+                data.focus != old["focus"]
+                and data.mode == old["mode"]
+                and data.assist_enabled == old["assist_enabled"]
+                and (
+                    presence is None
+                    or presence.model_dump()
+                    == {k: old["presence"][k] for k in ("place_id", "direction", "source")}
+                )
+            )
             reason = (
                 "MODE_QUIET"
                 if data.mode == "quiet"
@@ -277,10 +335,17 @@ class Service(ExchangeRules, VoiceRules):
                 if not data.assist_enabled
                 else "CONTEXT_CHANGED"
             )
-            db.execute(
-                "UPDATE deliveries SET state='cancelled',reason_code=? WHERE recipient_id=? AND type='invitation' AND state IN ('pending','prompted')",
-                (reason, user),
-            )
+            if focus_only:
+                db.execute(
+                    "UPDATE deliveries SET profile_revision=?,attention_json=NULL WHERE recipient_id=? "
+                    "AND type='invitation' AND state IN ('pending','prompted')",
+                    (revision, user),
+                )
+            else:
+                db.execute(
+                    "UPDATE deliveries SET state='cancelled',reason_code=? WHERE recipient_id=? AND type='invitation' AND state IN ('pending','prompted')",
+                    (reason, user),
+                )
             for d in db.execute(
                 "SELECT id FROM deliveries WHERE recipient_id=? AND type='audio' AND state='pending'",
                 (user,),
@@ -291,13 +356,15 @@ class Service(ExchangeRules, VoiceRules):
                 )
         return {"profile": self.profile(db, user), **self.now()}
 
-    def eligibility(self, p, question):
+    def eligibility(self, p, question, db=None):
         if p["mode"] == "quiet":
             return "MODE_QUIET"
-        if not p["assist_enabled"]:
+        if not (self.voice_invite_allowed(db, p) if db is not None else p["assist_enabled"]):
             return "ASSIST_DISABLED"
         if question["target_latitude"] is not None:
-            if p["source"] not in ("android", "android_mock") or p["latitude"] is None:
+            if (
+                p["source"] not in ("android", "android_mock") and not self.is_remote_place(p)
+            ) or p["latitude"] is None:
                 return "LOCATION_MISMATCH"
             if p["source"] == "android_mock" and not self.settings.allow_mock_location:
                 return "LOCATION_UNTRUSTED"
@@ -305,6 +372,8 @@ class Service(ExchangeRules, VoiceRules):
                 return "PRESENCE_EXPIRED"
             if p["accuracy_m"] > self.settings.location_accuracy_m:
                 return "LOCATION_IMPRECISE"
+            if db is not None and self.shared_park(db, p["place_id"], question["target_place_id"]):
+                return "ELIGIBLE"
             if (
                 distance_m(
                     p["latitude"],
@@ -327,10 +396,12 @@ class Service(ExchangeRules, VoiceRules):
 
     def expire(self, db):
         now = self.clock()
+        self.expire_chats(db)
         db.execute(
             "UPDATE posts SET question_status='expired' WHERE question_status='waiting' AND expires_at<=?",
             (now,),
         )
+        self.sync_personal_tasks(db)
         db.execute(
             "UPDATE deliveries SET state='expired',reason_code='TASK_EXPIRED' WHERE state IN ('pending','prompted') AND expires_at<=?",
             (now,),
@@ -340,7 +411,7 @@ class Service(ExchangeRules, VoiceRules):
         ).fetchall()
         for d in rows:
             q = self.post(db, d["question_id"])
-            reason = self.eligibility(self.profile_row(db, d["recipient_id"]), q)
+            reason = self.eligibility(self.profile_row(db, d["recipient_id"]), q, db)
             if q["question_status"] != "waiting":
                 reason = "TASK_EXPIRED" if q["question_status"] == "expired" else "TASK_CANCELLED"
             if reason != "ELIGIBLE":
@@ -400,6 +471,14 @@ class Service(ExchangeRules, VoiceRules):
     def draft(self, db, user, meta, audio):
         validate_wav(audio)
         fields = meta.model_dump(mode="json", exclude_none=True)
+        if isinstance(meta, VoiceDraft):
+            # Preserve old immutable request fingerprints when new fields use legacy defaults.
+            for key, default in (
+                ("validity_policy", "bounded"),
+                ("content_origin", "human_original"),
+            ):
+                if fields.get(key) == default:
+                    fields.pop(key)
         fingerprint = digest(
             json.dumps(fields, sort_keys=True, ensure_ascii=False).encode() + audio
         )
@@ -457,7 +536,12 @@ class Service(ExchangeRules, VoiceRules):
             self.save_qa_source(db, user, self.post(db, pid), fields)
         if isinstance(meta, (VoiceDraft, ReplyDraft)):
             self.save_voice_draft(db, user, pid, fields)
-        if meta.recorded_location:
+        if self.is_remote_place(self.profile_row(db, user)):
+            db.execute(
+                "UPDATE posts SET recorded_location=? WHERE id=?",
+                (self.profile_row(db, user)["location_json"], pid),
+            )
+        elif meta.recorded_location:
             fix = meta.recorded_location
             if sampled_epoch(fix) > self.clock() + 10:
                 raise Problem(422, "LOCATION_TIME_INVALID", "录音位置时间无效")
@@ -506,11 +590,15 @@ class Service(ExchangeRules, VoiceRules):
             return {}
 
     def attention_approved(self, db, delivery):
-        if not self.settings.decision_enabled:
-            return True
-        value = self.attention_record(delivery)
-        return value.get("action") == "notify" and value.get("input_key") == self.attention_key(
-            self.profile_row(db, delivery["recipient_id"]), self.post(db, delivery["post_id"])
+        # Conversation first: the model labels relevance, not delivery permission.
+        # Explicit quiet/refusal, geography and freshness still come from live rules.
+        return (
+            self.eligibility(
+                self.profile_row(db, delivery["recipient_id"]),
+                self.post(db, delivery["post_id"]),
+                db,
+            )
+            == "ELIGIBLE"
         )
 
     def next_attention(self):
@@ -525,7 +613,7 @@ class Service(ExchangeRules, VoiceRules):
                 if (
                     post["author_id"] != d["recipient_id"]
                     and post["question_status"] == "waiting"
-                    and self.eligibility(profile, post) == "ELIGIBLE"
+                    and self.eligibility(profile, post, db) == "ELIGIBLE"
                 ):
                     return {
                         "id": d["id"],
@@ -561,7 +649,7 @@ class Service(ExchangeRules, VoiceRules):
                 or self.attention_key(p, q) != snapshot["input_key"]
                 or q["author_id"] == p["user_id"]
                 or q["question_status"] != "waiting"
-                or self.eligibility(p, q) != "ELIGIBLE"
+                or self.eligibility(p, q, db) != "ELIGIBLE"
             ):
                 return False
             record = {
@@ -623,18 +711,8 @@ class Service(ExchangeRules, VoiceRules):
                     (self.clock(), self.clock() + self.settings.question_ttl, pid),
                 )
                 q = self.post(db, pid)
-                for profile in db.execute(
-                    "SELECT * FROM profiles WHERE user_id!=?", (user,)
-                ).fetchall():
-                    if self.eligibility(profile, q) == "ELIGIBLE":
-                        self.create_delivery(
-                            db,
-                            profile["user_id"],
-                            pid,
-                            pid,
-                            "invitation",
-                            min(q["expires_at"], self.clock() + self.settings.invitation_ttl),
-                        )
+                self.ensure_question_task(db, q)
+                self.route_question(db, q)
             else:
                 q = self.valid_invitation(db, user, p["invitation_id"], p["reply_to"])
                 if q["question_status"] != "waiting":
@@ -665,6 +743,7 @@ class Service(ExchangeRules, VoiceRules):
                     self.clock() + self.settings.audio_ttl,
                 )
         p = self.post(db, pid)
+        self.task_on_message(db, p)
         q = p if p["kind"] == "question" else self.post(db, p["reply_to"])
         return {
             "post_id": pid,
@@ -712,15 +791,23 @@ class Service(ExchangeRules, VoiceRules):
         return self.question(db, user, qid)
 
     def audio_payload(self, p):
-        return {
+        payload = {
             "post_id": p["id"],
             "transcript": p["transcript"],
-            "author_label": f"参与者 {p['author_id']}",
+            "author_label": self.message_author_label(p),
             "published_at": stamp(p["published_at"]),
             "audio_url": f"/v1/audio/{p['id']}",
         }
+        try:
+            with wave.open(str(self.store.audio_dir / f"{p['id']}.wav"), "rb") as audio:
+                payload["duration_seconds"] = audio.getnframes() / audio.getframerate()
+        except (OSError, wave.Error):
+            pass
+        return payload
 
     def delivery(self, db, user, did):
+        if did.startswith("chatd_"):
+            return self.chat_delivery(db, user, did)
         d = self.delivery_row(db, user, did)
         p = self.post(db, d["post_id"])
         reason = d["reason_code"]
@@ -750,7 +837,7 @@ class Service(ExchangeRules, VoiceRules):
             else {
                 "transcript": p["transcript"],
                 "author_id": p["author_id"],
-                "author_label": f"参与者 {p['author_id']}",
+                "author_label": self.message_author_label(p),
                 "visibility": "public",
                 "operator_reply_channel": self.channel_reply_option(db, user, p["id"]),
                 "place_id": p["target_place_id"],
@@ -762,8 +849,12 @@ class Service(ExchangeRules, VoiceRules):
                 **(
                     {
                         "attention": {
-                            "action": self.attention_record(d).get("action"),
-                            "provider": "bamboo",
+                            "action": "notify" if actionable else "defer",
+                            "provider": "sonar",
+                            "model_action": self.attention_record(d).get("action", "pending"),
+                            "model_reason": self.attention_record(d).get("reason"),
+                            "blocking": False,
+                            "policy": "conversation_first",
                             "model": BambooDecision.model,
                         }
                     }
@@ -772,6 +863,16 @@ class Service(ExchangeRules, VoiceRules):
                 ),
             }
         )
+        if d["type"] == "invitation":
+            task = self.question_task(db, p)
+            payload["collaboration"] = {
+                "request_id": p["id"],
+                "task_id": task["id"] if task else None,
+                "deadline": stamp(p["expires_at"]),
+                "visibility": "public",
+                "policy_version": "1",
+                "allowed_actions": ["answer", "decline"],
+            }
         data = json.loads(d["voice_json"] or "{}")
         if d["type"] == "audio":
             payload["reasons"] = data.get(
@@ -816,6 +917,8 @@ class Service(ExchangeRules, VoiceRules):
         }
 
     def ack(self, db, user, did, event, request_id):
+        if did.startswith("chatd_"):
+            return self.chat_ack(db, user, did, event, request_id)
         d = self.delivery_row(db, user, did)
         if d["request_id"] != request_id:
             raise Problem(409, "REQUEST_CONFLICT", "播放请求已改变")
@@ -893,19 +996,34 @@ class Service(ExchangeRules, VoiceRules):
         now = self.clock()
         self.feeds = {key: value for key, value in self.feeds.items() if value["expires"] > now}
         candidates = []
+        profile = self.profile_row(db, user)
+        session = self.current_agent_session(db, user)
+        places = {profile["place_id"]}
+        if session:
+            places.add(session["place_id"])
+        places.update(
+            r[0]
+            for r in db.execute("SELECT place_id FROM user_destinations WHERE user_id=?", (user,))
+        )
         rows = db.execute(
-            "SELECT * FROM posts WHERE status='published' ORDER BY published_at DESC,id DESC LIMIT 100"
-        ).fetchall()
+            "SELECT * FROM posts WHERE status='published' ORDER BY CASE kind WHEN 'answer' THEN 0 "
+            "WHEN 'reply' THEN 0 WHEN 'question' THEN 1 WHEN 'announcement' THEN 2 ELSE 3 END,published_at DESC,id DESC"
+        )
         for p in rows:
+            if p["author_id"] == user or not self.information_live(db, user, p):
+                continue
             if (
-                p["kind"] not in ("question", "answer")
-                or p["author_id"] == user
-                or not self.can_read_audio(db, user, p)
+                p["kind"] not in ("question", "answer", "reply")
+                and p["target_place_id"] not in places
             ):
                 continue
-            if p["kind"] == "question" and p["question_status"] != "waiting":
-                continue
-            candidates.append(self.voice_payload(db, p))
+            candidate = (
+                self.voice_payload(db, p)
+                if p["kind"] == "question"
+                else self.information_candidate(db, user, p)
+            )
+            if candidate:
+                candidates.append(candidate)
             if len(candidates) >= 10:
                 break
         request_id = ident("feed")
@@ -923,8 +1041,31 @@ class Service(ExchangeRules, VoiceRules):
             "expires_at": stamp(now + 30),
             "profile": me["profile"],
             "tasks": [self.question(db, user, qid) for qid in me["recent_question_ids"]],
+            "agent_session": self.current_agent_session(db, user),
             "candidates": candidates,
+            "destinations": [
+                dict(r)
+                for r in db.execute(
+                    "SELECT d.alias,p.id AS place_id,p.label FROM user_destinations d JOIN places p ON p.id=d.place_id WHERE d.user_id=? ORDER BY d.alias",
+                    (user,),
+                )
+            ],
+            "chat": [
+                dict(r)
+                for r in db.execute(
+                    "SELECT id,state FROM chat_requests WHERE user_id=? AND state IN ('waiting','paired','agent')",
+                    (user,),
+                )
+            ],
         }
+
+    def current_agent_session(self, db, user):
+        row = db.execute(
+            "SELECT id FROM exchange_sessions WHERE user_id=? AND state='active' "
+            "AND expires_at>? ORDER BY created_at DESC LIMIT 1",
+            (user, self.clock()),
+        ).fetchone()
+        return self.exchange_view(db, user, row["id"])["session"] if row else None
 
     def set_focus(self, db, user, expected_revision, mode=None, assist_enabled=None, focus=None):
         p = self.profile(db, user)
@@ -950,8 +1091,11 @@ class Service(ExchangeRules, VoiceRules):
         if p["mode"] == "quiet":
             raise Problem(409, "MODE_QUIET", "当前处于安静模式")
         post = self.post(db, post_id)
-        if not self.can_read_audio(db, user, post):
+        if not self.information_live(db, user, post):
             raise Problem(410, "CANDIDATE_EXPIRED", "声音已不可访问")
+        if post["kind"] in ("scene", "knowledge", "announcement", "reply"):
+            queued = self.queue_place_voice(db, user, post_id, request_id + ":" + post_id)
+            return {"delivery_id": queued["delivery"]["id"], "state": queued["delivery"]["state"]}
         qid = post["reply_to"] or post["id"]
         if post["kind"] == "answer":
             expires = post["published_at"] + self.settings.audio_ttl

@@ -14,7 +14,11 @@ import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import java.io.File
 import java.util.UUID
+import java.time.ZoneId
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -35,6 +39,7 @@ data class ExchangeState(
     val phase: String = "off",
     val message: String = "",
     val place: String = "",
+    val remote: Boolean = false,
     val quiet: Boolean = false,
     val publishing: Boolean = false,
     val playing: Boolean = false,
@@ -43,11 +48,18 @@ data class ExchangeState(
     val privateCount: Int = 0,
     val localCommands: Boolean = false,
     val echoProtected: Boolean = false,
+    val speaker: String = "human",
+    val responseText: String = "",
+    val privateOnly: Boolean = false,
+    val sources: List<JSONObject> = emptyList(),
+    val visibility: String = "",
+    val grants: SessionCapabilities? = null,
 )
 
 object ExchangeRuntime {
     internal val mutable = MutableStateFlow(ExchangeState())
     val state = mutable.asStateFlow()
+    internal var activeService: ExchangeService? = null
 }
 
 /** Starts only from a visible user action. No boot receiver, sticky restart or implicit re-consent. */
@@ -81,6 +93,21 @@ class ExchangeService : Service() {
     @Volatile private var closing = false
     private val localPending = java.util.concurrent.atomic.AtomicInteger()
     private var controlJob: Job? = null
+    private val locationMutex = Mutex()
+    private val echoGuard = PlaybackEchoGuard(SystemClock::elapsedRealtime)
+    private var lastRequestId: String? = null
+    private val startResolved = CompletableDeferred<JSONObject?>()
+    private val sessionLock = Any()
+    @Volatile private var requestedQuiet: Boolean? = null
+    @Volatile private var controlTransition = false
+    private var recognitionFailures = 0
+    private var receiptCursor = 0
+    private var receiptJob: Job? = null
+    private var lastReceiptCheck = 0L
+    private var commands: LocalSpeechCommands? = null
+    private val pendingTaskNotices = linkedMapOf<String, String>()
+    private val notifiedTasks = mutableSetOf<String>()
+    private var noticeSynthesis: suspend (String, File) -> Unit = { text, file -> AgentSpeech(this).synthesize(text, file); Unit }
     private val segments = Channel<Captured>(1)
     private data class Captured(val pcm: ByteArray, val cut: Boolean, val blocked: Boolean, val epoch: Int, val time: String, val echo: String?)
 
@@ -88,9 +115,10 @@ class ExchangeService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        audio = AudioCoordinator(this)
+        ExchangeRuntime.activeService = this
+        audio = AudioCoordinator(this, onFocusLost = ::interruptedBySystem)
         val manager = getSystemService(NotificationManager::class.java)
-        manager.createNotificationChannel(NotificationChannel("exchange", "现场交流", NotificationManager.IMPORTANCE_LOW).apply {
+        manager.createNotificationChannel(NotificationChannel("exchange", "声呐语音", NotificationManager.IMPORTANCE_LOW).apply {
             setSound(null, null); enableVibration(false)
         })
     }
@@ -99,19 +127,20 @@ class ExchangeService : Service() {
         when (intent?.action) {
             START -> {
                 if (runJob != null) return START_NOT_STICKY
-                ExchangeRuntime.mutable.value = ExchangeState(owned = true, phase = "starting", message = "正在开启本次现场交流", place = intent.getStringExtra("place_label").orEmpty())
+                ExchangeRuntime.mutable.value = ExchangeState(owned = true, phase = "starting", message = "正在准备语音", place = intent.getStringExtra("place_label").orEmpty())
                 val notification = NotificationCompat.Builder(this, "exchange")
-                    .setSmallIcon(android.R.drawable.ic_btn_speak_now).setContentTitle("声呐现场交流")
+                    .setSmallIcon(android.R.drawable.ic_btn_speak_now).setContentTitle("声呐语音会话")
                     .setContentText("麦克风用于本次交流；可随时安静或结束")
                     .setSilent(true).setOngoing(true).setOnlyAlertOnce(true)
                     .setContentIntent(PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE))
                     .addAction(0, "安静", actionIntent(QUIET, 1))
                     .addAction(0, "结束", actionIntent(STOP, 2)).build()
                 try {
+                    val locationType = if (PhoneLocation(this).permitted()) ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION else 0
                     if (Build.VERSION.SDK_INT >= 30)
-                        startForeground(41, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
+                        startForeground(41, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or locationType)
                     else if (Build.VERSION.SDK_INT >= 29)
-                        startForeground(41, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
+                        startForeground(41, notification, locationType)
                     else startForeground(41, notification)
                     runJob = scope.launch { runExchange(intent) }
                 } catch (_: Exception) {
@@ -129,9 +158,21 @@ class ExchangeService : Service() {
     private fun actionIntent(action: String, code: Int) = PendingIntent.getService(
         this, code, Intent(this, ExchangeService::class.java).setAction(action), PendingIntent.FLAG_IMMUTABLE)
 
-    private fun audioAvailable() = getSystemService(AudioManager::class.java).mode == AudioManager.MODE_NORMAL
+    private fun interruptedBySystem() {
+        if (!closing && !localQuiet && ExchangeRuntime.state.value.owned) {
+            quiet()
+            update("quiet", "其他音频或通话中断了交流，已保持安静；停车后可主动恢复")
+        }
+    }
+
+    private fun audioAvailable(): Boolean {
+        val available = getSystemService(AudioManager::class.java).mode == AudioManager.MODE_NORMAL
+        if (!available && !closing && !localQuiet) scope.launch { interruptedBySystem() }
+        return available
+    }
 
     private fun update(phase: String, message: String) {
+        android.util.Log.i("SonarVoice", "phase=$phase playing=$playing quiet=$localQuiet")
         ExchangeRuntime.mutable.update { it.copy(phase = phase, message = message, quiet = localQuiet,
             playing = playing, echoProtected = capture?.echoProtected == true,
             privateCount = if (::privateDir.isInitialized) privateDir.listFiles()?.count { f -> f.extension == "wav" } ?: 0 else 0) }
@@ -139,44 +180,100 @@ class ExchangeService : Service() {
 
     private suspend fun runExchange(intent: Intent) {
         try {
-            check(Build.VERSION.SDK_INT >= 28) { "自然交流需要 Android 9 或以上" }
+            check(Build.VERSION.SDK_INT >= 28) { "语音会话需要 Android 9 或以上" }
             config = ConfigStore(this).load()
-            check(!config.mock && !config.debugTranscript && !config.simulatedLocation && config.testPlaceId.isBlank()) { "自然交流使用真实定位和语音，请先退出模拟与手动转写模式" }
             check(config.token.isNotBlank()) { "请先配置声呐连接" }
-            val publish = intent.getBooleanExtra("auto_publish", false)
-            val play = intent.getBooleanExtra("auto_play", false)
-            check(!publish || config.linxToken.isNotBlank()) { "请先绑定灵矽，验证真实语音识别" }
-            check(PhoneLocation(this).permitted()) { "请先允许定位" }
+            check(config.linxToken.isNotBlank()) { "请先绑定灵矽语音" }
             api = HttpSonarApi(config.baseUrl, config.token, clock, BuildConfig.DEBUG)
             journal = TaskStore(this, config.scope)
             privateDir = File(filesDir, "exchange-private/${config.scope}").apply { mkdirs() }
-            val profile = Profile.parse(api.me().getJSONObject("profile"))
-            check(profile.mode != "quiet") { "当前已安静，请先恢复收听" }
-            session = api.startExchange(json("client_request_id" to UUID.randomUUID().toString(),
-                "expected_revision" to profile.revision, "place_id" to intent.getStringExtra("place_id"),
-                "auto_publish" to publish, "auto_play" to play)).getJSONObject("session")
-            val commands = LocalSpeechCommands(this)
-            // A recognizer service being installed does not prove the Chinese offline model works.
-            ExchangeRuntime.mutable.update { it.copy(localCommands = false) }
+            commands = LocalSpeechCommands(this).also { it.prepare() }
+            ExchangeRuntime.mutable.update { it.copy(localCommands = true) }
+            val me = api.me()
+            var profile = Profile.parse(me.getJSONObject("profile"))
+            if (config.remotePlaceId.isNotBlank()) {
+                profile = Profile.parse(api.remotePlace(profile.revision, config.remotePlaceId).getJSONObject("profile"))
+            }
+            val request = json("client_request_id" to UUID.randomUUID().toString(),
+                "interaction_mode" to "voice_first",
+                "expected_revision" to profile.revision,
+                "place_id" to intent.getStringExtra("place_id").orEmpty(),
+                "timezone" to ZoneId.systemDefault().id)
+            if (closing) return
+            rememberSession(api.startExchange(request).getJSONObject("session"))
+            startResolved.complete(session)
+            if (closing) return
+            check(session!!.text("interaction_mode") == "voice_first") { "请连接新版声呐服务" }
+            localQuiet = requestedQuiet ?: (session!!.text("state") == "paused" || session!!.optBoolean("quiet"))
+            while (!closing) {
+                val desired = requestedQuiet ?: break
+                val latestProfile = Profile.parse(api.me().getJSONObject("profile"))
+                api.context(json("expected_revision" to latestProfile.revision, "assist_enabled" to latestProfile.assist,
+                    "focus" to latestProfile.focus, "mode" to if (desired) "quiet" else "listen"))
+                val latest = rememberSession(api.exchangeSession(session!!.getString("id")).getJSONObject("session"))
+                if (closing) return
+                rememberSession(api.changeExchange(latest.getString("id"), latest.getInt("revision"), if (desired) "paused" else "active").getJSONObject("session"))
+                if (requestedQuiet == desired) { localQuiet = desired; break }
+            }
+            if (closing) return
+            applyProfile(profile.presence)
+            ExchangeRuntime.mutable.update { it.copy(remote = session!!.optBoolean("remote"), privateOnly = false) }
+            scope.launch { reconcilePending() }
             capture = ExchangeCapture()
-            launchChildren(commands, publish, play)
+            launchChildren(commands!!)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            update("unavailable", e.message ?: "自然交流不可用")
-            end()
+            update("unavailable", e.message ?: "语音暂不可用")
+            if (!closing) failureVoice(R.raw.voice_failure, stopAfter = true)
+        } finally {
+            if (!startResolved.isCompleted) startResolved.complete(null)
         }
     }
 
-    private suspend fun launchChildren(commands: LocalSpeechCommands, publish: Boolean, play: Boolean) = kotlinx.coroutines.coroutineScope {
+    private fun rememberSession(value: JSONObject): JSONObject = synchronized(sessionLock) {
+        val old = session
+        if (old == null || old.text("id") == value.text("id") && value.optInt("revision") >= old.optInt("revision")) session = value
+        session ?: value
+    }
+
+    private fun applyProfile(presence: JSONObject) {
+        ExchangeRuntime.mutable.update { it.copy(
+            place = presence.text("place_name").ifBlank { it.place },
+            remote = presence.text("source") == "remote_place") }
+    }
+
+    private suspend fun reconcilePending() {
+        val receipts = journal.pendingRequests()
+        if (receipts.isEmpty()) { receiptCursor = 0; return }
+        val batch = (0 until minOf(5, receipts.size)).map { receipts[(receiptCursor + it) % receipts.size] }
+        receiptCursor = (receiptCursor + batch.size) % receipts.size
+        for (pending in batch) {
+            try {
+                val requestId = pending.getString("request_id")
+                val known = api.requestResult(requestId)
+                known.optJSONObject("turn")?.let { journal.recordTurnResult(requestId, it) }
+            } catch (e: CancellationException) { throw e }
+            catch (_: Exception) { /* Retain the unknown receipt. Never upload it again. */ }
+        }
+    }
+
+    private suspend fun launchChildren(commands: LocalSpeechCommands) = kotlinx.coroutines.coroutineScope {
         launch {
             while (isActive) {
                 try {
-                    val me = api.me().getJSONObject("profile")
-                    val fix = PhoneLocation(this@ExchangeService).current()
-                    api.location(me.getInt("revision"), fix)
+                    locationMutex.withLock {
+                        val me = Profile.parse(api.me().getJSONObject("profile"))
+                        val remote = config.remotePlaceId
+                        val response = if (remote.isNotBlank()) api.remotePlace(me.revision, remote)
+                        else if (PhoneLocation(this@ExchangeService).permitted())
+                            api.location(me.revision, PhoneLocation(this@ExchangeService).current()) else null
+                        response?.getJSONObject("profile")?.getJSONObject("presence")?.let(::applyProfile)
+                        val current = session
+                        if (current != null) rememberSession(api.exchangeSession(current.getString("id")).getJSONObject("session"))
+                    }
                 } catch (e: CancellationException) { throw e }
-                catch (_: Exception) { /* Server refuses automatic publishing with a stale fix. */ }
+                catch (_: Exception) { /* Stale location cannot become an on-site claim. */ }
                 delay(15000)
             }
         }
@@ -184,49 +281,97 @@ class ExchangeService : Service() {
             for (clip in segments) {
                 if (clip.epoch != epoch || closing) { localPending.decrementAndGet(); continue }
                 val file = File(cacheDir, "exchange-${UUID.randomUUID()}.wav")
+                android.util.Log.i("SonarVoice", "segment bytes=${clip.pcm.size} cut=${clip.cut} blocked=${clip.blocked}")
+                if (!localQuiet && !closing) update("recognizing", "已收音，正在识别这句话")
                 file.writeBytes(Wav.header(clip.pcm.size) + clip.pcm)
                 // Local controls must not wait for either cloud recognition or a pending upload.
                 val local = runCatching { commands.recognize(file) }.getOrNull()
                 localPending.decrementAndGet()
-                ExchangeRuntime.mutable.update { it.copy(localCommands = !local.isNullOrBlank()) }
+                // Readiness came from loading the bundled model, not recognizing arbitrary speech.
                 val localCommand = local?.let(::localExchangeCommand)
                 if (localCommand != null) {
                     file.delete()
                     if (!looksLikePlaybackEcho(local, clip.echo, minLength = 2)) handleCommand(localCommand)
                     continue
                 }
-                if (clip.epoch != epoch || localQuiet || !publish || closing || !audioAvailable()) { file.delete(); continue }
+                if (clip.epoch != epoch || localQuiet || closing || !audioAvailable()) { file.delete(); continue }
                 if (clip.cut || clip.blocked || submitJob?.isActive == true) {
-                    retain(file); file.delete(); update("private", "这段保持私有，现场交流继续"); continue
+                    retain(file); file.delete()
+                    if (clip.cut) failureVoice(R.raw.voice_too_long)
+                    else if (clip.blocked) failureVoice(R.raw.voice_retry)
+                    else failureVoice(R.raw.voice_retry)
+                    continue
                 }
                 submitJob = launch {
                     var uploadStarted = false
                     try {
                         ExchangeRuntime.mutable.update { it.copy(publishing = true) }
                         update("recognizing", "正在处理本次发言")
-                        val transcript = local?.takeIf { it.isNotBlank() }
-                            ?: LinxSession(allowLocal = BuildConfig.DEBUG).transcribe(file, config)
+                        val transcript = LinxSession(allowLocal = BuildConfig.DEBUG).transcribe(file, config)
+                        android.util.Log.i("SonarVoice", "stt_complete chars=${transcript.length}")
                         val command = localExchangeCommand(transcript)
                         if (looksLikePlaybackEcho(transcript, clip.echo, minLength = if (command == null) 4 else 2)) {
                             retain(file); update("private", "这段可能含扬声器回声，保持私有"); return@launch
                         }
                         if (command != null) { handleCommand(command); return@launch }
-                        ExchangeRuntime.mutable.update { it.copy(lastPostId = null, lastKind = null) }
+                        ExchangeRuntime.mutable.update { it.copy(lastPostId = null, lastKind = null, responseText = "", sources = emptyList(), visibility = "") }
                         contextJob?.join()
-                        if (!heardContextReady) { retain(file); update("private", "原声上下文尚未同步，这段保持私有"); return@launch }
-                        val revision = session!!.getInt("revision")
-                        if (clip.epoch != epoch || localQuiet || closing || !audioAvailable()) { retain(file); return@launch }
-                        uploadStarted = true
-                        uploadInFlight = true
-                        val result = api.exchangeUpload(session!!.getString("id"), file,
-                            json("client_request_id" to file.nameWithoutExtension.removePrefix("exchange-"),
-                                "expected_session_revision" to revision, "transcript" to transcript, "recorded_at" to clip.time))
+                        if (!heardContextReady) { retain(file); update("private", "原声上下文尚未同步，这段保持私有"); failureVoice(R.raw.voice_retry); return@launch }
+                        val requestId = file.nameWithoutExtension.removePrefix("exchange-")
+                        val result = locationMutex.withLock {
+                            if (clip.epoch != epoch || localQuiet || closing || !audioAvailable()) throw CancellationException("会话已改变")
+                            val live = rememberSession(api.exchangeSession(session!!.getString("id")).getJSONObject("session"))
+                            val metadata = json("client_request_id" to requestId,
+                                "expected_session_revision" to live.getInt("revision"), "transcript" to transcript, "recorded_at" to clip.time)
+                            journal.beginTurn(requestId, live.getString("id"), metadata)
+                            lastRequestId = requestId
+                            update("sending", "识别完成，正在发送到声呐服务器")
+                            uploadStarted = true; uploadInFlight = true
+                            api.exchangeUpload(live.getString("id"), file, metadata).also { response ->
+                                response.optJSONObject("session")?.let(::rememberSession)
+                                val action = response.optJSONObject("voice_action")
+                                if (action?.text("type") == "location") {
+                                    val store = ConfigStore(this@ExchangeService)
+                                    store.save(store.load().copy(remotePlaceId = if (action.optBoolean("use_real_location")) "" else action.getString("place_id")))
+                                    config = store.load()
+                                    response.optJSONObject("profile")?.optJSONObject("presence")?.let(::applyProfile)
+                                }
+                            }
+                        }
+                        journal.recordTurnResult(requestId, result)
+                        android.util.Log.i("SonarVoice", "server_result status=${result.text("status")} action=${result.text("action")}")
                         if (clip.epoch != epoch || localQuiet || closing) return@launch
-                        if (result.text("status") == "published") {
-                            ExchangeRuntime.mutable.update { it.copy(lastPostId = result.text("post_id"), lastKind = result.text("action")) }
-                            update("shared", "已分享现场原声") // UI only; never TTS.
+                        recognitionFailures = 0
+                        result.optJSONObject("session")?.let(::rememberSession)
+                        result.optJSONObject("profile")?.optJSONObject("presence")?.let(::applyProfile)
+                        if (result.optJSONObject("voice_action") != null) {
+                            handleVoiceAction(result.getJSONObject("voice_action"), result.optJSONObject("agent_response"), clip.epoch)
+                        } else if (result.text("action") == "private_chat") {
+                            val reply = LinxSession(allowLocal = BuildConfig.DEBUG).exchange(file, config)
+                            if (clip.epoch == epoch && !localQuiet && !closing) {
+                                val pcm = reply.audio ?: error("私人助手没有返回语音")
+                                playAgent(reply.assistantText, clip.epoch, Wav.header(pcm.bytes.size, pcm.rate) + pcm.bytes)
+                            }
+                        } else if (result.optJSONObject("agent_response") != null) {
+                            val response = result.getJSONObject("agent_response")
+                            val text = response.text("text")
+                            ExchangeRuntime.mutable.update { it.copy(responseText = text, speaker = "agent", sources = response.objects("sources"), visibility = "private") }
+                            update(if (result.text("status") == "clarifying") "clarifying" else "agent_response", text)
+                            playSourcedAgent(text, clip.epoch, sources = response.objects("sources"), taskId = result.text("task_id").ifBlank { null })
+                        } else if (result.text("status") == "chatting") {
+                            ExchangeRuntime.mutable.update { it.copy(visibility = "participants") }
+                            update("chatting", "车友交流中，双方原声仅参与者可听")
+                        } else if (result.text("status") == "published") {
+                            ExchangeRuntime.mutable.update { it.copy(lastPostId = result.text("post_id"), lastKind = result.text("action"), visibility = "public") }
+                            val receipt = submissionReceipt(result)
+                            update(if (result.text("action") == "question") "waiting" else "shared", receipt)
+                            playAgent(receipt, clip.epoch)
                         } else if (result.text("status") == "ignored") update("ready", "现场交流中")
-                        else { retain(file); update("private", "这段保持私有，现场交流继续") }
+                        else {
+                            retain(file)
+                            if (result.text("status") == "deferred") failureVoice(R.raw.voice_retry)
+                            else update("ready", "正在听")
+                        }
                     } catch (e: CancellationException) {
                         if (uploadStarted) {
                             retain(file)
@@ -235,10 +380,14 @@ class ExchangeService : Service() {
                         throw e
                     }
                     catch (e: Exception) {
+                        android.util.Log.w("SonarVoice", "turn_failed uploaded=$uploadStarted type=${e.javaClass.simpleName}")
                         retain(file)
                         update(if (uploadStarted) "unknown" else "private",
-                            if (uploadStarted) "发送结果待核对，这段不会自动补发"
-                            else if (e is ApiFailure && e.status in setOf(401, 403, 410)) e.message else "这段暂存，等待网络或位置恢复")
+                            if (uploadStarted) "发送结果待核对，不会自动补发" else "这句话没有发送")
+                        recognitionFailures++
+                        failureVoice(if (uploadStarted) R.raw.voice_unknown else R.raw.voice_network,
+                            stopAfter = e is LinxAuthFailure || recognitionFailures >= 2)
+                        if (uploadStarted) scope.launch { reconcilePending() }
                     } finally {
                         uploadInFlight = false
                         ExchangeRuntime.mutable.update { it.copy(publishing = false) }
@@ -251,20 +400,35 @@ class ExchangeService : Service() {
         launch {
             while (isActive) {
                 try {
+                    if (SystemClock.elapsedRealtime() - lastReceiptCheck > 15000 && receiptJob?.isActive != true) {
+                        lastReceiptCheck = SystemClock.elapsedRealtime()
+                        receiptJob = scope.launch { reconcilePending() }
+                    }
                     val s = session ?: return@launch
                     val pollEpoch = epoch
-                    val current = api.exchangeSession(s.getString("id")).getJSONObject("session")
+                    val current = rememberSession(api.exchangeSession(s.getString("id")).getJSONObject("session"))
                     if (pollEpoch != epoch || closing) continue
-                    if (current.getInt("revision") >= (session?.optInt("revision") ?: 0)) session = current
+                    rememberSession(current)
+                    for (task in current.objects("task_updates")) {
+                        val id = task.text("id")
+                        if (task.text("status") == "timed_out" && id.isNotBlank() && task.text("question_id").isNotBlank() && id !in notifiedTasks) {
+                            val place = task.text("place_name").ifBlank { "那里" }
+                            pendingTaskNotices.putIfAbsent(id, "${place}还没有收到现场回应，这次先结束等待。")
+                        }
+                    }
+                    if (current.optJSONObject("chat")?.text("state") == "closed") {
+                        if (currentDelivery?.payload?.text("kind") == "chat") { audio.stopPlayback(); playerJob?.cancel() }
+                        if (ExchangeRuntime.state.value.phase == "chatting") update("ready", "本次车友交流已结束，可继续向声呐提问")
+                    }
                     if (current.text("state") == "ended") { update("ended", "本次交流已结束"); end(); return@launch }
-                    if (!localQuiet && (current.text("state") == "paused" || current.optBoolean("quiet"))) quiet()
+                    if (!localQuiet && (!controlTransition && current.text("state") == "paused" || current.optBoolean("quiet"))) quiet()
                     if (!audioAvailable()) { audio.stopPlayback(); playerJob?.cancel() }
                     if (!localQuiet && audioAvailable() && current.text("state") == "active") {
                         for ((key, ack) in journal.acks()) {
                             sendStoredAck(api, ack)
                             journal.clearAck(key)
                         }
-                        if (play) {
+                        run {
                             val feed = api.exchangeInbox(current.getString("id"), journal.excludedDeliveryIds())
                             if (!localQuiet && !closing && localPending.get() == 0 && capture?.speaking != true && submitJob?.isActive != true && playerJob?.isActive != true && contextJob?.isActive != true) {
                                 feed.objects("items").map(Delivery::parse)
@@ -272,25 +436,28 @@ class ExchangeService : Service() {
                                     ?.let { playOriginal(it, epoch) }
                             }
                         }
+                        if (canPlay(epoch) && submitJob?.isActive != true && playerJob?.isActive != true && contextJob?.isActive != true) {
+                            pendingTaskNotices.entries.firstOrNull()?.let { playTaskNotice(it.key, it.value, epoch) }
+                        }
                     }
                 } catch (e: CancellationException) { throw e }
                 catch (e: Exception) {
-                    if (e is ApiFailure && (e.status in setOf(401, 403) || e.status == 410 && !localQuiet)) {
-                        update("unavailable", e.message); end(); return@launch
+                    if (e is ApiFailure && e.status in setOf(401, 403, 410)) {
+                        update("unavailable", "语音会话暂不可用，请停车后检查连接")
+                        failureVoice(R.raw.voice_failure, stopAfter = true); return@launch
                     }
                 }
                 delay(1000)
             }
         }
-        update("ready", "现场交流中")
         capture!!.run(onStart = {
-            val speakerWindow = playing || SystemClock.elapsedRealtime() - lastAudioEnd < 500
-            sourceBlocked = speakerWindow && capture?.echoProtected != true
-            segmentEcho = if (speakerWindow) lastPlaybackText else null
+            sourceBlocked = playing && capture?.echoProtected != true
+            segmentEcho = if (playing) lastPlaybackText else null
             segmentEpoch = epoch
             segmentTime = runCatching { clock.now().toString() }.getOrDefault("")
             val clipEpoch = epoch
             scope.launch {
+                if (clipEpoch == epoch && !localQuiet && !closing) update("capturing", "正在收音，停顿后识别发送")
                 if (clipEpoch == epoch && playing) {
                     interrupted = currentDelivery
                     currentDelivery?.let { journal.defer(it.key, true) }
@@ -302,12 +469,19 @@ class ExchangeService : Service() {
             localPending.incrementAndGet()
             if (!segments.trySend(captured).isSuccess) {
                 localPending.decrementAndGet()
-                if (localQuiet || !publish || closing || captured.epoch != epoch) return@segment
+                if (localQuiet || closing || captured.epoch != epoch) return@segment
                 val private = File(cacheDir, "exchange-${UUID.randomUUID()}.wav")
                 private.writeBytes(Wav.header(pcm.size) + pcm)
                 retain(private); private.delete()
             }
-        }, allowed = ::audioAvailable)
+        }, allowed = ::audioAvailable, onReady = {
+            scope.launch { update(if (localQuiet) "quiet" else "ready", if (localQuiet) "已保留安静状态" else "正在听") }
+        }, isSpeakerEcho = echoGuard::isEcho, onSilence = {
+            scope.launch {
+                if (!closing && !localQuiet && ExchangeRuntime.state.value.phase == "capturing" &&
+                    localPending.get() == 0 && submitJob?.isActive != true) update("ready", "正在听")
+            }
+        })
     }
 
     private fun playOriginal(d: Delivery, expectedEpoch: Int) {
@@ -316,30 +490,29 @@ class ExchangeService : Service() {
             var failed = false
             try {
                 val bytes = api.download(d.payload.getString("audio_url"))
+                val playbackBytes = originalPlaybackLevel(bytes)
                 val before = Delivery.parse(api.delivery(d.id).getJSONObject("delivery"))
                 val sid = session!!.getString("id")
-                val live = api.exchangeSession(sid).getJSONObject("session")
+                val live = rememberSession(api.exchangeSession(sid).getJSONObject("session"))
                 if (epoch != expectedEpoch || localQuiet || localPending.get() > 0 || !audioAvailable() || capture?.speaking == true || submitJob?.isActive == true || live.text("state") != "active" ||
                     !clock.valid(before) || before.key != d.key || before.revision != d.revision) return@launch
                 journal.markAttempt(before.key)
-                file = File(cacheDir, "exchange-play-${UUID.randomUUID()}.wav").apply { writeBytes(bytes) }
+                file = File(cacheDir, "exchange-play-${UUID.randomUUID()}.wav").apply { writeBytes(playbackBytes) }
                 currentDelivery = before
                 lastPlaybackText = before.payload.text("transcript")
+                ExchangeRuntime.mutable.update { it.copy(speaker = "human", responseText = before.payload.text("transcript"),
+                    sources = listOf(before.payload), visibility = if (before.payload.text("kind") == "chat") "participants" else before.payload.text("visibility", "public")) }
                 audio.play(file!!, ownSpeaker = true,
                     mayStart = { epoch == expectedEpoch && !localQuiet && !closing && localPending.get() == 0 &&
                         capture?.speaking != true && audioAvailable() },
                     onStarted = {
                         playing = true
+                        echoGuard.begin(playbackBytes)
                         heardContextReady = false
                         update("playing", "正在听相关原声")
-                        contextJob = scope.launch {
-                            try {
-                                api.exchangeContext(sid, live.getInt("revision"), before.payload.getString("post_id"))
-                                if (epoch == expectedEpoch && !closing) heardContextReady = true
-                            } catch (_: Exception) { /* Following speech stays private without a verified parent. */ }
-                        }
+                        syncPlaybackContext(sid, before.payload.getString("post_id"), before.payload.optBoolean("synthetic"), expectedEpoch)
                     })
-                journal.queueAck(before, "played")
+                journal.queueAck(before, if (before.type == "invitation") "prompted" else "played")
             } catch (e: CancellationException) {
                 currentDelivery?.let { journal.defer(it.key, true) }
                 throw e
@@ -347,14 +520,316 @@ class ExchangeService : Service() {
                 failed = true
                 journal.markAttempt(d.key); journal.queueAck(d, "failed")
                 update("playback_unavailable", e.message ?: "原声播放暂不可用")
+                failureVoice(R.raw.voice_playback_error)
             } finally {
                 if (playing) lastAudioEnd = SystemClock.elapsedRealtime()
+                echoGuard.stop()
                 playing = false
                 currentDelivery = null
                 file?.delete()
                 if (failed) ExchangeRuntime.mutable.update { it.copy(playing = false) }
                 if (!closing && !failed) update(if (localQuiet) "quiet" else "ready", if (localQuiet) "已安静，自动分享与播放已暂停" else "现场交流中")
             }
+        }
+    }
+
+    private fun playAgent(text: String, expectedEpoch: Int, wav: ByteArray? = null) =
+        playSourcedAgent(text, expectedEpoch, wav)
+
+    private fun playSourcedAgent(text: String, expectedEpoch: Int, wav: ByteArray? = null, sources: List<JSONObject> = emptyList(), taskId: String? = null) {
+        ExchangeRuntime.mutable.update { it.copy(responseText = text, speaker = "agent", sources = sources, visibility = "private") }
+        val submitting = submitJob
+        playerJob = scope.launch {
+            val file = File(cacheDir, "agent-response-${UUID.randomUUID()}.wav")
+            try {
+                submitting?.join()
+                if (epoch != expectedEpoch || localQuiet || closing) return@launch
+                if (wav != null) file.writeBytes(wav) else AgentSpeech(this@ExchangeService).synthesize(text, file)
+                if (taskId != null && api.personalTask(taskId).text("status") in setOf("cancelled", "resolved", "timed_out", "failed")) {
+                    ExchangeRuntime.mutable.update { it.copy(responseText = "") }
+                    update("private", "任务已结束，这条回应没有播放")
+                    return@launch
+                }
+                for ((purpose, group) in sources.filter { it.text("post_id").isNotBlank() }.groupBy { it.text("retrieval_purpose", "all") }) {
+                    if (!api.validateInformation(group.map { it.getString("post_id") }, purpose)) {
+                        ExchangeRuntime.mutable.update { it.copy(responseText = "") }
+                        update("private", "来源已更新或失效，这条回应没有播放")
+                        return@launch
+                    }
+                }
+                if (sources.any { it.text("valid_until").isNotBlank() && clock.remaining(it.getString("valid_until")) <= 0 }) return@launch
+                if (epoch != expectedEpoch || localQuiet || closing || capture?.speaking == true || localPending.get() > 0 || !audioAvailable()) return@launch
+                lastPlaybackText = text
+                audio.play(file, AudioMode.PROMPT, ownSpeaker = true,
+                    mayStart = { epoch == expectedEpoch && !localQuiet && !closing && localPending.get() == 0 && capture?.speaking != true && audioAvailable() && sources.none { it.text("valid_until").isNotBlank() && clock.remaining(it.getString("valid_until")) <= 0 } },
+                    onStarted = { playing = true; echoGuard.begin(file.readBytes()); update("agent_response", "声呐正在回应") })
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (!closing && !localQuiet) {
+                    update("unavailable", "中文语音暂不可用，请停车后检查")
+                    failureVoice(R.raw.voice_failure, stopAfter = true)
+                }
+            } finally {
+                if (playing) lastAudioEnd = SystemClock.elapsedRealtime()
+                echoGuard.stop()
+                playing = false
+                file.delete()
+                ExchangeRuntime.mutable.update { it.copy(playing = false) }
+            }
+        }
+    }
+
+    private suspend fun handleVoiceAction(action: JSONObject, response: JSONObject?, expectedEpoch: Int) {
+        when (action.text("type")) {
+            "location" -> {
+                epoch++
+                audio.stopPlayback(); playerJob?.cancel(); contextJob?.cancel()
+                heardContextReady = true
+                val real = action.optBoolean("use_real_location")
+                val selected = if (real) "" else action.getString("place_id")
+                locationMutex.withLock {
+                    val store = ConfigStore(this)
+                    store.save(store.load().copy(remotePlaceId = selected))
+                    config = store.load()
+                    if (real) {
+                        ExchangeRuntime.mutable.update { it.copy(place = "手机位置待更新", remote = false) }
+                        try {
+                            val fix = PhoneLocation(this).current()
+                            val profile = Profile.parse(api.me().getJSONObject("profile"))
+                            applyProfile(api.location(profile.revision, fix).getJSONObject("profile").getJSONObject("presence"))
+                            rememberSession(api.exchangeSession(session!!.getString("id")).getJSONObject("session"))
+                        } catch (e: CancellationException) { throw e }
+                        catch (_: Exception) {
+                            playSourcedAgent("手机真实位置暂未取得。你可以继续与我交谈，停车后再检查定位权限。", epoch)
+                            return
+                        }
+                    }
+                }
+                val text = response?.text("text").orEmpty()
+                if (text.isNotBlank()) playSourcedAgent(text, epoch)
+            }
+            "play_audio" -> {
+                val items = action.objects("items")
+                val submitting = submitJob
+                val previous = playerJob
+                previous?.cancel()
+                playerJob = scope.launch {
+                    previous?.join()
+                    submitting?.join()
+                    try {
+                        val preface = action.text("preface")
+                        if (preface.isNotBlank()) playTextNow(preface, expectedEpoch)
+                        for (item in items) {
+                            if (!canPlay(expectedEpoch)) break
+                            playSelectedOriginal(item, expectedEpoch)
+                        }
+                    } catch (e: CancellationException) { throw e }
+                    catch (_: Exception) { failureVoice(R.raw.voice_playback_error) }
+                }
+            }
+        }
+    }
+
+    private fun canPlay(expectedEpoch: Int) = epoch == expectedEpoch && !localQuiet && !closing &&
+        localPending.get() == 0 && capture?.speaking != true && audioAvailable()
+
+    private suspend fun playTextNow(text: String, expectedEpoch: Int) {
+        val file = File(cacheDir, "voice-preface-${UUID.randomUUID()}.wav")
+        try {
+            try { AgentSpeech(this).synthesize(text, file) }
+            catch (e: CancellationException) { throw e }
+            catch (e: Exception) {
+                if (text.contains("合成测试声音")) resources.openRawResource(R.raw.voice_sample_intro).use { input ->
+                    file.outputStream().use { input.copyTo(it) }
+                } else throw e
+            }
+            if (!canPlay(expectedEpoch)) return
+            lastPlaybackText = text
+            ExchangeRuntime.mutable.update { it.copy(speaker = "agent", responseText = text) }
+            audio.play(file, AudioMode.PROMPT, ownSpeaker = true, mayStart = { canPlay(expectedEpoch) },
+                onStarted = { playing = true; echoGuard.begin(file.readBytes()); update("agent_response", "声呐正在回应") })
+        } finally { echoGuard.stop(); playing = false; file.delete() }
+    }
+
+    private suspend fun playSelectedOriginal(item: JSONObject, expectedEpoch: Int) {
+        val postId = item.getString("post_id")
+        val bytes = api.download(item.getString("audio_url"))
+        val playbackBytes = originalPlaybackLevel(bytes)
+        val message = api.message(postId).getJSONObject("message")
+        val state = message.getJSONObject("state")
+        check(state.text("publication") == "published" && state.text("applicability") !in setOf("expired", "not_started")) { "原声已失效" }
+        val until = message.getJSONObject("time").text("valid_until")
+        if (!canPlay(expectedEpoch) || until.isNotBlank() && clock.remaining(until) <= 0) return
+        val file = File(cacheDir, "voice-selected-${UUID.randomUUID()}.wav").apply { writeBytes(playbackBytes) }
+        val synthetic = item.optBoolean("synthetic") || message.getJSONObject("body").text("content_origin") == "agent_synthesized"
+        try {
+            lastPlaybackText = item.text("transcript")
+            ExchangeRuntime.mutable.update { it.copy(speaker = if (synthetic) "agent" else "human",
+                responseText = item.text("transcript"), sources = listOf(item)) }
+            audio.play(file, ownSpeaker = true, mayStart = { canPlay(expectedEpoch) && (until.isBlank() || clock.remaining(until) > 0) }, onStarted = {
+                playing = true; echoGuard.begin(playbackBytes); update("playing", if (synthetic) "正在听合成测试声音" else "正在听原声")
+                heardContextReady = false
+                syncPlaybackContext(session!!.getString("id"), postId, synthetic, expectedEpoch)
+            })
+        } finally {
+            echoGuard.stop(); playing = false; file.delete()
+            if (!localQuiet && !closing) update("ready", "正在听")
+        }
+    }
+
+    private fun syncPlaybackContext(sid: String, postId: String, synthetic: Boolean, expectedEpoch: Int) {
+        contextJob?.cancel()
+        contextJob = scope.launch {
+            try {
+                val live = rememberSession(api.exchangeSession(sid).getJSONObject("session"))
+                if (epoch != expectedEpoch || localQuiet || closing) return@launch
+                val synced = api.exchangeContext(sid, live.getInt("revision"), postId).getJSONObject("session")
+                if (synthetic) {
+                    val policy = synced.getJSONObject("voice_policy")
+                    check(policy.text("last_audio_post_id") == postId && policy.text("heard_post_id").isBlank() &&
+                        synced.text("context_post_id").isBlank()) { "合成试听不能建立真人回应上下文" }
+                }
+                rememberSession(synced)
+                if (epoch == expectedEpoch && !closing) heardContextReady = true
+            } catch (e: CancellationException) { throw e }
+            catch (_: Exception) { /* Following speech stays private until actual playback context is verified. */ }
+        }
+    }
+
+    private fun playTaskNotice(id: String, text: String, expectedEpoch: Int) {
+        playerJob = scope.launch {
+            val file = File(cacheDir, "voice-task-${UUID.randomUUID()}.wav")
+            try {
+                noticeSynthesis(text, file)
+                if (!canPlay(expectedEpoch)) return@launch
+                lastPlaybackText = text
+                ExchangeRuntime.mutable.update { it.copy(speaker = "agent", responseText = text, sources = emptyList()) }
+                audio.play(file, AudioMode.PROMPT, ownSpeaker = true, mayStart = { canPlay(expectedEpoch) }, onStarted = {
+                    notifiedTasks.add(id); pendingTaskNotices.remove(id)
+                    playing = true; echoGuard.begin(file.readBytes()); update("agent_response", "等待已结束")
+                })
+            } catch (e: CancellationException) { throw e }
+            catch (_: Exception) { failureVoice(R.raw.voice_failure, stopAfter = true) }
+            finally {
+                echoGuard.stop(); playing = false; file.delete()
+                if (!localQuiet && !closing) update("ready", "正在听")
+            }
+        }
+    }
+
+    private fun failureVoice(resource: Int, stopAfter: Boolean = false) {
+        val failureEpoch = epoch
+        val previous = playerJob
+        previous?.cancel()
+        playerJob = scope.launch {
+            previous?.join()
+            if (stopAfter) {
+                capture?.stop()
+                localQuiet = true
+                update("unavailable", ExchangeRuntime.state.value.message.ifBlank { "语音暂不可用，请停车后检查" })
+            }
+            val file = File(cacheDir, "voice-failure-${UUID.randomUUID()}.wav")
+            try {
+                var waited = 0
+                while (!closing && capture?.speaking == true && waited < 30000) { delay(50); waited += 50 }
+                if (closing || failureEpoch != epoch || localQuiet && !stopAfter) return@launch
+                resources.openRawResource(resource).use { input -> file.outputStream().use { input.copyTo(it) } }
+                audio.play(file, AudioMode.PROMPT, ownSpeaker = true,
+                    mayStart = { !closing && failureEpoch == epoch && (stopAfter || !localQuiet) },
+                    onStarted = {
+                        playing = true
+                        echoGuard.begin(file.readBytes())
+                        ExchangeRuntime.mutable.update { it.copy(playing = true, speaker = "system") }
+                        android.util.Log.i("SonarVoice", "system_feedback_started")
+                    })
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { android.util.Log.w("SonarVoice", "feedback_playback_failed type=${e.javaClass.simpleName}") }
+            finally {
+                echoGuard.stop(); playing = false; file.delete()
+                if (stopAfter) end()
+            }
+        }
+    }
+
+    private fun cancelCurrentNeed() {
+        epoch++
+        val requestEpoch = epoch
+        audio.stopPlayback(); playerJob?.cancel(); submitJob?.cancel()
+        val previousControl = controlJob
+        previousControl?.cancel()
+        controlTransition = true
+        controlJob = scope.launch {
+            try {
+                previousControl?.join()
+                val old = rememberSession(api.exchangeSession(session!!.getString("id")).getJSONObject("session"))
+                // Revoke an in-flight turn even if it has not created a durable task yet.
+                rememberSession(api.changeExchange(old.getString("id"), old.getInt("revision"), "paused").getJSONObject("session"))
+                val tasks = api.personalTasks().objects("items")
+                val unfinished = tasks.filter { it.text("status") !in setOf("cancelled", "resolved", "timed_out", "failed") }
+                val target = unfinished.firstOrNull { it.text("request_id") == lastRequestId }
+                    ?: unfinished.firstOrNull { it.text("status") in setOf("waiting", "querying", "clarifying") }
+                if (target != null) {
+                    try { api.taskAction(target.getString("id"), target.getInt("revision"), UUID.randomUUID().toString(), "cancel") }
+                    catch (e: ApiFailure) {
+                        if (e.status != 409) throw e
+                        val current = api.personalTask(target.getString("id"))
+                        if (current.text("status") !in setOf("cancelled", "resolved", "timed_out", "failed"))
+                            api.taskAction(current.getString("id"), current.getInt("revision"), UUID.randomUUID().toString(), "cancel")
+                    }
+                }
+                if (closing || requestEpoch != epoch) return@launch
+                if (!localQuiet) {
+                    val latest = rememberSession(api.exchangeSession(old.getString("id")).getJSONObject("session"))
+                    rememberSession(api.changeExchange(old.getString("id"), latest.getInt("revision"), "active").getJSONObject("session"))
+                    playSourcedAgent(if (target == null) "目前没有需要等待的问题。" else "好，不再等这个问题。", requestEpoch)
+                } else update("quiet", "已取消等待，仍保持安静")
+            } catch (e: CancellationException) { throw e }
+            catch (_: Exception) {
+                update("unknown", "取消结果待核对，安静状态不变")
+                if (!localQuiet) failureVoice(R.raw.voice_unknown)
+            } finally { controlTransition = false }
+        }
+    }
+
+    private fun undoLastPublication() {
+        val before = ExchangeRuntime.state.value
+        val wasPending = uploadInFlight
+        val requestId = lastRequestId
+        quiet()
+        val paused = controlJob
+        controlJob = scope.launch {
+            try {
+                paused?.join()
+                var postId = before.lastPostId
+                var kind = before.lastKind
+                if (wasPending && requestId != null) {
+                    val receipt = api.requestResult(requestId)
+                    val turn = receipt.optJSONObject("turn")
+                    if (turn != null) {
+                        journal.recordTurnResult(requestId, turn)
+                        postId = turn.text("post_id").ifBlank { null }
+                        kind = turn.text("action")
+                        if (turn.text("status") in setOf("deciding", "clarifying")) {
+                            update("unknown", "已暂停，刚才的发送结果仍待核对")
+                            return@launch
+                        }
+                    }
+                }
+                when {
+                    kind == "scene" && postId != null -> {
+                        api.withdrawVoice(postId)
+                        update("quiet", "刚才的现场分享已撤回，仍保持安静")
+                    }
+                    kind == "question" && postId != null -> {
+                        api.cancel(postId)
+                        update("quiet", "刚才的提问已取消，仍保持安静")
+                    }
+                    postId != null -> update("quiet", "这条原声已发出，当前暂不能撤回；仍保持安静")
+                    else -> update("quiet", "已停止待发送内容，仍保持安静")
+                }
+            } catch (e: CancellationException) { throw e }
+            catch (_: Exception) { update("unknown", "已暂停，刚才的发送或撤回结果待核对") }
         }
     }
 
@@ -377,22 +852,14 @@ class ExchangeService : Service() {
                 interrupted?.let { journal.defer(it.key, true) }
                 update("ready", "当前声音已停，现场交流继续")
             }
-            "undo" -> {
-                val pending = uploadInFlight
-                quiet()
-                val last = ExchangeRuntime.state.value
-                if (pending) update("unknown", "交流已暂停；刚才的发送结果待核对，不会自动补发")
-                else if (last.lastKind == "scene" && last.lastPostId != null) scope.launch {
-                    runCatching { api.withdrawVoice(last.lastPostId) }
-                        .onSuccess { update("quiet", "刚才的现场分享已撤回，交流已暂停") }
-                        .onFailure { update("quiet", "交流已暂停，刚才的发送结果待核对") }
-                }
-            }
+            "cancel" -> cancelCurrentNeed()
+            "undo" -> undoLastPublication()
         }
     }
 
     private fun quiet() {
         if (closing) return
+        requestedQuiet = true
         localQuiet = true; epoch++
         audio.stopPlayback(); playerJob?.cancel(); submitJob?.cancel()
         update("quiet", "已安静，自动分享与播放已暂停")
@@ -400,8 +867,8 @@ class ExchangeService : Service() {
         controlJob = scope.launch {
             runCatching {
                 val s = session ?: return@runCatching
-                val latest = api.exchangeSession(s.getString("id")).getJSONObject("session")
-                session = api.changeExchange(s.getString("id"), latest.getInt("revision"), "paused").getJSONObject("session")
+                val latest = rememberSession(api.exchangeSession(s.getString("id")).getJSONObject("session"))
+                rememberSession(api.changeExchange(s.getString("id"), latest.getInt("revision"), "paused").getJSONObject("session"))
                 val p = Profile.parse(api.me().getJSONObject("profile"))
                 api.context(json("expected_revision" to p.revision, "assist_enabled" to p.assist, "focus" to p.focus, "mode" to "quiet"))
             }
@@ -410,6 +877,8 @@ class ExchangeService : Service() {
 
     private fun resume() {
         if (closing || !localQuiet) return
+        requestedQuiet = false
+        if (session == null) { localQuiet = false; epoch++; update("starting", "正在准备语音"); return }
         val resumeEpoch = epoch
         val pending = controlJob
         controlJob = scope.launch {
@@ -418,10 +887,11 @@ class ExchangeService : Service() {
             try {
                 val p = Profile.parse(api.me().getJSONObject("profile"))
                 api.context(json("expected_revision" to p.revision, "assist_enabled" to p.assist, "focus" to p.focus, "mode" to "listen"))
-                val s = api.exchangeSession(session!!.getString("id")).getJSONObject("session")
-                session = api.changeExchange(s.getString("id"), s.getInt("revision"), "active").getJSONObject("session")
+                val s = rememberSession(api.exchangeSession(session!!.getString("id")).getJSONObject("session"))
+                rememberSession(api.changeExchange(s.getString("id"), s.getInt("revision"), "active").getJSONObject("session"))
                 if (epoch != resumeEpoch || closing) return@launch
-                epoch++; localQuiet = false; update("ready", "现场交流中")
+                epoch++; localQuiet = false; update("ready", "正在听")
+                scope.launch { reconcilePending() }
             } catch (_: Exception) { update("quiet", "仍保持安静，稍后再恢复") }
         }
     }
@@ -431,13 +901,18 @@ class ExchangeService : Service() {
         closing = true; epoch++
         controlJob?.cancel(); contextJob?.cancel()
         capture?.stop(); audio.close(); playerJob?.cancel(); submitJob?.cancel()
+        playing = false
+        if (ExchangeRuntime.state.value.phase != "unavailable") update("ending", "麦克风已关闭，正在结束本次交流")
         scope.launch {
-            withTimeoutOrNull(3000) {
-                runCatching {
-                    session?.let {
-                        val latest = api.exchangeSession(it.getString("id")).getJSONObject("session")
-                        api.changeExchange(latest.getString("id"), latest.getInt("revision"), "ended")
-                    }
+            val known = session ?: withTimeoutOrNull(15000) { startResolved.await() }
+            if (known != null) withTimeoutOrNull(3000) {
+                repeat(2) {
+                    try {
+                        val latest = rememberSession(api.exchangeSession(known.getString("id")).getJSONObject("session"))
+                        rememberSession(api.changeExchange(latest.getString("id"), latest.getInt("revision"), "ended").getJSONObject("session"))
+                        return@withTimeoutOrNull
+                    } catch (e: CancellationException) { throw e }
+                    catch (_: Exception) { /* Retry only the same end operation, never a voice turn. */ }
                 }
             }
             stopSelf()
@@ -448,6 +923,7 @@ class ExchangeService : Service() {
         capture?.stop(); audio.close(); scope.cancel(); segments.close()
         ExchangeRuntime.mutable.update { it.copy(owned = false, publishing = false, playing = false,
             phase = if (it.phase == "unavailable") it.phase else "off") }
+        if (ExchangeRuntime.activeService === this) ExchangeRuntime.activeService = null
         super.onDestroy()
     }
 

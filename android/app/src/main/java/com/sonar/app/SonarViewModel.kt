@@ -47,15 +47,19 @@ data class ScreenState(
     val conversationId: String? = null,
     val canReply: Boolean = false,
     val linx: LinxState = LinxState(),
-    val testPlaces: List<PlaceChoice> = emptyList(),
-    val testClips: List<DemoClip> = emptyList(),
+    val placeShortcuts: List<PlaceChoice> = emptyList(),
+    val personalTasks: List<PersonalTask> = emptyList(),
+    val pendingRequests: Int = 0,
+    val taskServiceAvailable: Boolean = true,
+    val taskNotice: String = "",
 )
 
 class SonarViewModel(app: Application) : AndroidViewModel(app) {
     private val configStore = ConfigStore(app)
-    private val audio = AudioCoordinator(app)
+    private val audio = AudioCoordinator(app, onFocusLost = {
+        if (!mutable.value.quiet) toggleQuiet()
+    })
     private val phoneLocation = PhoneLocation(app)
-    private val demoLibrary = DemoLibrary(app)
     private val clock = ServerClock(SystemClock::elapsedRealtime)
     private val mutable = MutableStateFlow(ScreenState())
     val state = mutable.asStateFlow()
@@ -79,6 +83,8 @@ class SonarViewModel(app: Application) : AndroidViewModel(app) {
     private var composition: String? = null
     private val received = mutableSetOf<String>()
     private var catalogRefresh = 0L
+    private var taskRefresh = 0L
+    private var receiptCursor = 0
     private var linxBindingJob: Job? = null
     private var linxVoiceJob: Job? = null
 
@@ -94,6 +100,8 @@ class SonarViewModel(app: Application) : AndroidViewModel(app) {
                         store.questionId = current.lastPostId
                         mutable.update { it.copy(question = null) }
                     }
+                    val saved = runCatching { configStore.load() }.getOrNull()
+                    if (saved != null && saved != config) configure(saved, false)
                     if (uiVisible) activate()
                 }
                 owned = current.owned
@@ -101,31 +109,27 @@ class SonarViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun startExchange(autoPublish: Boolean, autoPlay: Boolean) {
+    fun startVoiceSession() {
         val s = mutable.value
         if (ExchangeRuntime.state.value.owned) return
-        if (s.draft != null || s.recording || s.transcribing || s.busy || s.linx.busy) {
-            notice("先在停车时处理当前录音或草稿，再开启现场交流")
+        if (s.recording || s.transcribing || s.busy || s.linx.busy) {
+            notice("请先完成当前语音检查")
             return
         }
-        val target = s.selectedPlace ?: run { notice("请先定位或选择交流地点"); return }
-        if (!s.connected || config.mock || config.debugTranscript || config.simulatedLocation || config.testPlaceId.isNotBlank()) {
-            notice("请先连接真实服务，退出模拟位置与手动转写")
-            return
-        }
-        if (s.quiet) { notice("当前已安静，请先恢复收听"); return }
-        if (!phoneLocation.permitted()) { notice("请先允许手机真实定位，再开启现场交流"); return }
-        if (autoPublish && config.linxToken.isBlank()) { notice("请先在我的页面绑定灵矽"); return }
+        if (!s.connected || config.token.isBlank()) { notice("请先在连接与隐私中连接声呐"); return }
+        if (config.linxToken.isBlank()) { notice("请先在连接与隐私中绑定灵矽语音"); return }
         automaticAudioSuspended = true
         store.automaticAudioSuspended = true
         val visible = uiVisible
         pause()
         uiVisible = visible
-        ExchangeRuntime.mutable.value = ExchangeState(owned = true, phase = "starting", place = target.label, message = "正在开启本次交流")
+        val place = s.selectedPlace
+        ExchangeRuntime.mutable.value = ExchangeState(owned = true, phase = "starting", place = place?.label.orEmpty(), message = "正在准备语音")
         runCatching {
             ContextCompat.startForegroundService(getApplication(), Intent(getApplication(), ExchangeService::class.java)
-                .setAction(ExchangeService.START).putExtra("place_id", target.id).putExtra("place_label", target.label)
-                .putExtra("auto_publish", autoPublish).putExtra("auto_play", autoPlay))
+                .setAction(ExchangeService.START).putExtra("voice_first", true)
+                .putExtra("place_id", place?.id.orEmpty()).putExtra("place_label", place?.label.orEmpty())
+                .putExtra("remote_place_id", config.remotePlaceId))
         }.onFailure {
             ExchangeRuntime.mutable.value = ExchangeState(phase = "unavailable", message = "系统未允许开启麦克风，请停车后重试")
         }
@@ -146,19 +150,9 @@ class SonarViewModel(app: Application) : AndroidViewModel(app) {
         audio.stopRecording()
         recordingJob?.cancel()
         generation++
-        config =
-            configStore
-                .normalize(next)
-                .copy(
-                    mock = BuildConfig.DEBUG && next.mock,
-                    debugTranscript = BuildConfig.DEBUG && next.debugTranscript,
-                    simulatedLocation = BuildConfig.DEBUG && next.simulatedLocation,
-                    testPlaceId =
-                        next.testPlaceId
-                            .takeIf { id -> demoLibrary.places.any { it.id == id } }
-                            .orEmpty(),
-                )
-        manualTarget = config.testPlaceId.isNotBlank()
+        taskRefresh = 0L
+        config = configStore.normalize(next)
+        manualTarget = config.remotePlaceId.isNotBlank()
         if (save) configStore.save(config)
         store = TaskStore(getApplication(), config.scope)
         automaticAudioSuspended = store.automaticAudioSuspended || ExchangeRuntime.state.value.owned
@@ -167,8 +161,7 @@ class SonarViewModel(app: Application) : AndroidViewModel(app) {
         var connectionError: String? = null
         api =
             runCatching {
-                    if (config.mock) MockSonarApi(clock)
-                    else if (config.token.isNotBlank())
+                    if (config.token.isNotBlank())
                         HttpSonarApi(config.baseUrl, config.token, clock, BuildConfig.DEBUG)
                     else null
                 }
@@ -177,23 +170,15 @@ class SonarViewModel(app: Application) : AndroidViewModel(app) {
         mutable.value =
             ScreenState(
                 config = config,
-                testPlaces = demoLibrary.places,
-                testClips = demoLibrary.clips.filter { it.placeId == config.testPlaceId },
                 linx =
                     if (config.linxToken.isNotBlank())
                         LinxState(phase = "bound", status = "已保存绑定配置，等待验证语音连接")
                     else LinxState(),
                 draft = store.draft,
+                pendingRequests = store.pendingRequests().size,
                 quiet = true,
-                selectedPlace =
-                    demoLibrary.places.firstOrNull { it.id == config.testPlaceId }
-                        ?: if (config.mock || config.simulatedLocation)
-                            PlaceChoice("zhonghuan_jinke", "中环路金科路口")
-                        else null,
-                locationStatus =
-                    if (config.testPlaceId.isNotBlank()) "模拟位置 · 测试内容 · 未使用手机定位"
-                    else if (config.mock || config.simulatedLocation) "演示地点 · 未使用手机定位"
-                    else "开启定位，问问附近的人",
+                selectedPlace = null,
+                locationStatus = if (config.remotePlaceId.isNotBlank()) "远程地点 · 正在读取高德地点" else "手机位置尚未更新",
                 message = connectionError ?: if (api == null) "请先填写服务地址和设备凭证" else "正在连接…",
             )
         if (foreground) activate()
@@ -204,13 +189,13 @@ class SonarViewModel(app: Application) : AndroidViewModel(app) {
         if (ExchangeRuntime.state.value.owned) return
         foreground = true
         if (polling?.isActive == true || api == null) return
-        if (!config.mock && !config.simulatedLocation) {
+        if (config.remotePlaceId.isBlank()) {
             locationLoop?.cancel()
             locationLoop =
                 viewModelScope.launch {
                     while (isActive && foreground) {
                         if (
-                            config.testPlaceId.isBlank() &&
+                            config.remotePlaceId.isBlank() &&
                                 phoneLocation.permitted() &&
                                 mutable.value.connected &&
                                 !mutable.value.recording &&
@@ -241,6 +226,121 @@ class SonarViewModel(app: Application) : AndroidViewModel(app) {
             }
     }
 
+    fun refreshTasks() {
+        viewModelScope.launch { refreshPersonalTasks() }
+    }
+
+    private suspend fun refreshPersonalTasks() {
+        val current = api ?: return
+        val taskStore = store
+        val requestGeneration = generation
+        try {
+            val tasks = current.personalTasks().objects("items").map(PersonalTask::parse)
+            val receipts = taskStore.pendingRequests()
+            val batch = if (receipts.isEmpty()) emptyList() else (0 until minOf(3, receipts.size)).map { receipts[(receiptCursor + it) % receipts.size] }
+            receiptCursor = if (receipts.isEmpty()) 0 else (receiptCursor + batch.size) % receipts.size
+            for (pending in batch) {
+                try {
+                    val result = current.requestResult(pending.getString("request_id"))
+                    taskStore.recordTurnResult(pending.getString("request_id"), result)
+                } catch (e: CancellationException) { throw e }
+                catch (_: Exception) { /* Remains unknown; never resend. */ }
+            }
+            if (generation == requestGeneration)
+                mutable.update { it.copy(personalTasks = tasks, pendingRequests = taskStore.pendingRequests().size, taskServiceAvailable = true, taskNotice = if (it.taskNotice.startsWith("任务核对暂不可用")) "任务已刷新" else it.taskNotice) }
+        } catch (e: CancellationException) { throw e }
+        catch (e: Exception) {
+            if (generation == requestGeneration)
+                mutable.update { it.copy(pendingRequests = taskStore.pendingRequests().size,
+                    taskServiceAvailable = !(e is ApiFailure && e.status == 404), taskNotice = "任务核对暂不可用，保留上次结果；可稍后刷新。") }
+        }
+    }
+
+    fun changeTask(task: PersonalTask, action: String) {
+        val current = api ?: return
+        val taskStore = store
+        stopPlayback()
+        val requestGeneration = generation
+        viewModelScope.launch {
+            try {
+                current.taskAction(task.id, task.revision, taskStore.taskActionId(task.id, task.revision, action), action)
+                if (generation == requestGeneration) refreshPersonalTasks()
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) {
+                if (generation == requestGeneration) {
+                    mutable.update { it.copy(taskNotice = "任务结果待核对，请刷新；重试保留原动作ID") }
+                    refreshPersonalTasks()
+                }
+            }
+        }
+    }
+
+    fun prepareTaskQuery(task: PersonalTask): Boolean {
+        val current = mutable.value
+        if (ExchangeRuntime.state.value.owned || current.draft != null || current.recording || current.transcribing || current.busy || current.linx.busy) {
+            mutable.update { it.copy(taskNotice = "先处理当前录音或草稿，再重新开启查询。") }
+            return false
+        }
+        if (task.placeId != null && mutable.value.selectedPlace?.id != task.placeId) {
+            val label = task.sources.firstOrNull()?.text("place_label").orEmpty().ifBlank { "原任务地点" }
+            selectPlace(PlaceChoice(task.placeId, label))
+        }
+        return true
+    }
+
+    /** Explicit history playback never resets completed deliveries or binds a new public reply context. */
+    fun hearTaskOriginal(postId: String, deliveryId: String? = null) {
+        if (ExchangeRuntime.state.value.owned || playerJob?.isActive == true || mutable.value.busy ||
+            mutable.value.recording || mutable.value.transcribing || mutable.value.linx.busy || !foreground) return
+        if (mutable.value.quiet) {
+            mutable.update { it.copy(taskNotice = "当前已安静，请先返回首页恢复收听，再主动听原声。") }
+            return
+        }
+        val current = api ?: return
+        val capturedStore = store
+        val requestGeneration = generation
+        playerJob = viewModelScope.launch {
+            var file: File? = null
+            var pendingDelivery: Delivery? = null
+            var started = false
+            try {
+                mutable.update { it.copy(playing = "history:$postId", taskNotice = "正在核对原声来源与时效") }
+                val message = VoiceMessageView.parse(current.message(postId).getJSONObject("message"))
+                check(message.id == postId && message.body.text("content_origin") == "human_original" &&
+                    message.state.text("publication") == "published" && message.state.text("applicability") == "valid") { "这条原声已失效，不能重听" }
+                check(current.validateInformation(listOf(postId))) { "原声已更新或失效，不能重听" }
+                pendingDelivery = if (deliveryId != null) Delivery.parse(current.delivery(deliveryId).getJSONObject("delivery"))
+                    else current.inbox().objects("items").map(Delivery::parse).firstOrNull { it.type == "audio" && it.payload.text("post_id") == postId }
+                pendingDelivery = pendingDelivery?.takeIf { clock.valid(it) && it.payload.text("post_id") == postId }
+                val bytes = current.download(message.body.getString("audio_ref"))
+                file = File(getApplication<Application>().cacheDir, "task-play-${UUID.randomUUID()}.wav").apply { writeBytes(bytes) }
+                check(current.validateInformation(listOf(postId))) { "原声已更新或失效，本次不播放" }
+                pendingDelivery?.let { before ->
+                    val latest = Delivery.parse(current.delivery(before.id).getJSONObject("delivery"))
+                    check(clock.valid(latest) && latest.key == before.key && latest.revision == before.revision) { "待听状态已变化，请刷新后重试" }
+                }
+                audio.play(file, ownSpeaker = true, mayStart = {
+                    generation == requestGeneration && foreground && !mutable.value.quiet && !ExchangeRuntime.state.value.owned
+                }, onStarted = {
+                    started = true
+                    pendingDelivery?.let { capturedStore.markAttempt(it.key) }
+                    mutable.update { it.copy(taskNotice = "正在播放原声；可随时停止。") }
+                })
+                pendingDelivery?.let { capturedStore.queueAck(it, "played") }
+                if (generation == requestGeneration) mutable.update { it.copy(taskNotice = "原声已听完；任务是否解决仍由你决定。") }
+            } catch (e: CancellationException) {
+                if (started) pendingDelivery?.let { capturedStore.defer(it.key, true) }
+                throw e
+            } catch (e: Exception) {
+                if (started) pendingDelivery?.let { capturedStore.defer(it.key, true) }
+                if (generation == requestGeneration) mutable.update { it.copy(taskNotice = errorText(e)) }
+            } finally {
+                file?.delete()
+                if (generation == requestGeneration) mutable.update { it.copy(playing = null) }
+            }
+        }
+    }
+
     fun pause() {
         uiVisible = false
         if (ExchangeRuntime.state.value.owned) return
@@ -258,20 +358,25 @@ class SonarViewModel(app: Application) : AndroidViewModel(app) {
 
     private suspend fun refresh() {
         val current = api ?: return
-        val me = Me.parse(current.me())
+        val raw = current.me()
+        val me = Me.parse(raw)
+        val shortcuts = raw.objects("place_shortcuts").map(PlaceChoice::parse)
         var profile = me.profile
-        if (
-            !config.mock &&
-                !config.simulatedLocation &&
-                ((config.testPlaceId.isNotBlank() &&
-                    profile.presence.text("source") != "unavailable") ||
-                    profile.presence.text("source") == "simulated" ||
-                    (!phoneLocation.permitted() &&
-                        profile.presence.text("source") != "unavailable"))
-        ) {
-            profile =
-                Profile.parse(current.location(profile.revision, null).getJSONObject("profile"))
+        if (config.remotePlaceId.isNotBlank()) {
+            if (profile.presence.text("source") != "remote_place" ||
+                profile.presence.text("place_id") != config.remotePlaceId ||
+                SystemClock.elapsedRealtime() - lastHeartbeat > 15000) {
+                profile = Profile.parse(current.remotePlace(profile.revision, config.remotePlaceId).getJSONObject("profile"))
+                lastFix = profile.presence.optJSONObject("location")
+                lastHeartbeat = SystemClock.elapsedRealtime()
+            }
+        } else if (profile.presence.text("source") in setOf("simulated", "simulated_place", "remote_place")) {
+            profile = Profile.parse(current.location(profile.revision, null).getJSONObject("profile"))
         }
+        mutable.update { state -> state.copy(placeShortcuts = shortcuts,
+            selectedPlace = if (config.remotePlaceId.isNotBlank()) shortcuts.firstOrNull { it.id == config.remotePlaceId }
+                ?: state.selectedPlace else state.selectedPlace,
+            locationStatus = if (config.remotePlaceId.isNotBlank()) "远程地点 · 非手机实到位置" else state.locationStatus) }
         pendingMode?.let { desired ->
             if (profile.mode != desired)
                 profile =
@@ -289,17 +394,9 @@ class SonarViewModel(app: Application) : AndroidViewModel(app) {
                 profile = profile,
                 quiet = quiet,
                 message =
-                    if (it.message.startsWith("正在连接") || it.message.startsWith("连接中断")) "已连接，可以录音提问"
+                    if (it.message.startsWith("正在连接") || it.message.startsWith("连接中断")) "已连接，可以开始语音"
                     else it.message,
             )
-        }
-        if (
-            config.simulatedLocation &&
-                presenceConfirmed &&
-                SystemClock.elapsedRealtime() - lastHeartbeat > 60000
-        ) {
-            current.context(contextData(profile))
-            lastHeartbeat = SystemClock.elapsedRealtime()
         }
         for ((key, ack) in store.acks()) {
             sendStoredAck(current, ack)
@@ -323,7 +420,11 @@ class SonarViewModel(app: Application) : AndroidViewModel(app) {
         }
         val items = current.inbox().objects("items").map(Delivery::parse)
         mutable.update { it.copy(deliveries = items) }
-        if (!config.mock) {
+        run {
+            if (SystemClock.elapsedRealtime() - taskRefresh > 5000) {
+                refreshPersonalTasks()
+                taskRefresh = SystemClock.elapsedRealtime()
+            }
             items
                 .filter { it.key !in received }
                 .forEach { d ->
@@ -331,60 +432,22 @@ class SonarViewModel(app: Application) : AndroidViewModel(app) {
                     received.add(d.key)
                 }
             if (SystemClock.elapsedRealtime() - catalogRefresh > 5000) {
-                mutable.value.catalogPlace?.let { loadCatalog(current, it) }
+                (mutable.value.catalogPlace ?: mutable.value.selectedPlace.takeIf { config.remotePlaceId.isNotBlank() })?.let { loadCatalog(current, it) }
                 mutable.value.conversationId?.let { loadConversation(current, it) }
                 catalogRefresh = SystemClock.elapsedRealtime()
             }
         }
-        if (
-            !automaticAudioSuspended &&
-                audio.gate.mode == AudioMode.IDLE &&
-                !mutable.value.busy &&
-                !mutable.value.linx.busy &&
-                !mutable.value.recording &&
-                !mutable.value.transcribing &&
-                !quiet &&
-                playerJob?.isActive != true
-        ) {
-            items
-                .filter { clock.valid(it) && !store.attempted(it.key) && !store.deferred(it.key) }
-                .minByOrNull {
-                    it.payload.optInt("priority", if (it.type == "invitation") 3 else 1)
-                }
-                ?.let {
-                    if (it.type == "invitation") promptInvitation(it) else playDelivery(it, false)
-                }
-        }
     }
 
     private fun contextData(p: Profile, mode: String = p.mode, assist: Boolean = p.assist) =
-        json(
-                "expected_revision" to p.revision,
-                "mode" to mode,
-                "assist_enabled" to assist,
-                "focus" to p.focus,
-            )
-            .apply {
-                if (
-                    (config.mock || config.simulatedLocation) &&
-                        p.presence.text("source") == "simulated"
-                )
-                    put(
-                        "presence",
-                        json(
-                            "place_id" to p.presence.text("place_id"),
-                            "direction" to "demo_exit",
-                            "source" to "simulated",
-                        ),
-                    )
-            }
+        json("expected_revision" to p.revision, "mode" to mode, "assist_enabled" to assist, "focus" to p.focus)
 
     fun useCurrentLocation() {
         if (!canChangeLocation()) return
         stopPlayback()
         locationJob?.cancel()
         locationJob = null
-        config = config.copy(testPlaceId = "", simulatedLocation = false)
+        config = config.copy(remotePlaceId = "", testPlaceId = "", simulatedLocation = false)
         configStore.save(config)
         lastFix = null
         manualTarget = false
@@ -392,7 +455,7 @@ class SonarViewModel(app: Application) : AndroidViewModel(app) {
             it.copy(
                 config = config,
                 selectedPlace = null,
-                testClips = emptyList(),
+                locationStatus = "正在获取当前设备位置…",
                 catalog = emptyList(),
                 channels = emptyList(),
                 catalogPlace = null,
@@ -407,80 +470,34 @@ class SonarViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun canChangeLocation(): Boolean {
         val s = mutable.value
-        if (s.recording || s.transcribing || s.busy || s.draft != null || s.linx.busy) {
-            notice("请先完成或丢弃当前录音，再切换位置。")
+        if (ExchangeRuntime.state.value.owned || s.recording || s.transcribing || s.busy || s.draft != null || s.linx.busy) {
+            notice("交流中请用语音切换地点；已有录音保持原地点。")
             return false
         }
         return true
     }
 
-    fun useTestPlace(place: PlaceChoice) {
-        if (!canChangeLocation() || place !in demoLibrary.places) return
+    fun useRemotePlace(place: PlaceChoice) {
+        if (!canChangeLocation() || place !in mutable.value.placeShortcuts) return
         stopPlayback()
         locationJob?.cancel()
         locationJob = null
         lastFix = null
         manualTarget = true
-        presenceConfirmed = false
-        config = config.copy(testPlaceId = place.id, simulatedLocation = false)
+        config = config.copy(remotePlaceId = place.id, testPlaceId = "", simulatedLocation = false)
         configStore.save(config)
-        mutable.update {
-            it.copy(
-                config = config,
-                selectedPlace = place,
-                locating = false,
-                locationStatus = "模拟位置 · 测试内容 · 未使用手机定位",
-                testClips = demoLibrary.clips.filter { clip -> clip.placeId == place.id },
-                catalog = emptyList(),
-                channels = emptyList(),
-                catalogPlace = null,
-                message = "已切换到${place.label}，可离线试听 12 条测试音频。",
-            )
-        }
-        // Cancel an in-flight real-location refresh; the next poll revokes physical presence.
+        mutable.update { it.copy(config = config, selectedPlace = place, locating = false,
+            locationStatus = "远程地点 · 非手机实到位置", catalog = emptyList(), channels = emptyList(),
+            catalogPlace = null, message = "已选择${place.label}，语音会话使用远程地点，不代表人在现场。") }
+        lastHeartbeat = 0L
         polling?.cancel()
         polling = null
         activate()
     }
 
-    fun playTestClip(clip: DemoClip) {
-        val s = mutable.value
-        if (
-            clip !in s.testClips ||
-                s.busy ||
-                s.recording ||
-                s.transcribing ||
-                s.linx.busy ||
-                !foreground
-        )
-            return
-        val previous = playerJob
-        stopPlayback()
-        playerJob =
-            viewModelScope.launch {
-                previous?.join()
-                mutable.update { it.copy(playing = "test:${clip.id}") }
-                try {
-                    val file =
-                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                            demoLibrary.file(clip)
-                        }
-                    audio.play(file, AudioMode.PREVIEW)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    notice(errorText(e))
-                } finally {
-                    mutable.update { it.copy(playing = null) }
-                }
-            }
-    }
-
     fun refreshLocation(applyToDraft: Boolean = false) {
         if (
-            config.mock ||
-                config.simulatedLocation ||
-                config.testPlaceId.isNotBlank() ||
+            config.remotePlaceId.isNotBlank() ||
                 locationJob?.isActive == true ||
                 !foreground
         )
@@ -589,19 +606,6 @@ class SonarViewModel(app: Application) : AndroidViewModel(app) {
         polling?.cancel()
         polling = null
         activate()
-    }
-
-    fun confirmPresence() = action {
-        check(config.mock || config.simulatedLocation) { "请使用手机真实定位" }
-        val p =
-            Profile.parse(
-                api!!
-                    .context(contextData(mutable.value.profile ?: error("请先连接")))
-                    .getJSONObject("profile")
-            )
-        presenceConfirmed = true
-        lastHeartbeat = SystemClock.elapsedRealtime()
-        mutable.update { it.copy(profile = p, message = "模拟位置已确认，仅在本次前台会话刷新") }
     }
 
     fun setFocus(value: String) = action {
@@ -1396,44 +1400,7 @@ class SonarViewModel(app: Application) : AndroidViewModel(app) {
         playerJob?.cancel()
         playerJob = null
         audio.stopPlayback()
-        mutable.update { it.copy(playing = null) }
-    }
-
-    private fun promptInvitation(d: Delivery) {
-        if (playerJob?.isActive == true) return
-        val currentApi = api ?: return
-        val currentStore = store
-        val startedGeneration = generation
-        playerJob =
-            viewModelScope.launch {
-                try {
-                    val latest = Delivery.parse(currentApi.delivery(d.id).getJSONObject("delivery"))
-                    if (
-                        !foreground ||
-                            generation != startedGeneration ||
-                            mutable.value.recording ||
-                            mutable.value.transcribing ||
-                            !clock.valid(latest) ||
-                            latest.requestId != d.requestId ||
-                            mutable.value.quiet ||
-                            audio.gate.mode != AudioMode.IDLE
-                    )
-                        return@launch
-                    currentStore.markAttempt(d.key)
-                    val file = File(getApplication<Application>().cacheDir, "onsite-prompt.wav")
-                    getApplication<Application>()
-                        .resources
-                        .openRawResource(com.sonar.app.R.raw.onsite_question)
-                        .use { input -> file.outputStream().use { input.copyTo(it) } }
-                    audio.play(file, AudioMode.PROMPT)
-                    currentStore.queueAck(d, "alerted")
-                    notice("附近有人询问，了解情况的话可以回应。")
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    notice(errorText(e))
-                }
-            }
+        mutable.update { it.copy(playing = null, taskNotice = if (it.playing?.startsWith("history:") == true) "原声已停止，未更改任务状态。" else it.taskNotice) }
     }
 
     fun notice(message: String) {

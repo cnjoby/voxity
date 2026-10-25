@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>声呐｜开始之后，只需说话</title>
+<style>
+/* DESIGN.md: Layout & Spacing, Components; EXPERIENCE.md: IA, State Patterns.
+   Static design reference; does not connect to a server, open a mic or play audio. */
+:root { color-scheme:light; --sea:#123e51; --teal:#007f86; --paper:#f0f5f5; --ink:#163440; --border:#d8e8e9; --amber:#966019; }
+* { box-sizing:border-box; }
+body { margin:0; background:#fff; color:var(--ink); font-family:system-ui,-apple-system,"PingFang SC",sans-serif; line-height:1.65; }
+main { max-width:1220px; margin:auto; padding:46px 30px 50px; }
+.eyebrow { color:var(--teal); font-size:13px; letter-spacing:.12em; }
+h1 { font-size:32px; letter-spacing:-.04em; color:var(--sea); margin:7px 0 8px; }
+.intro { max-width:780px; margin:0 0 30px; font-size:15px; }
+.screens { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:24px; }
+.caption { margin:0 0 10px; color:var(--sea); font-size:14px; font-weight:650; }
+.phone { position:relative; min-height:630px; border:1px solid var(--border); border-radius:30px; background:var(--paper); overflow:hidden; padding:22px 24px 24px; display:flex; flex-direction:column; }
+.system { display:flex; justify-content:space-between; font-size:12px; font-weight:600; margin-bottom:28px; }
+.brand { margin:0; font-size:25px; font-weight:700; color:var(--sea); }
+.location { min-height:22px; margin-top:5px; color:var(--sea); font-size:13px; }
+.center { display:flex; flex:1; flex-direction:column; justify-content:center; align-items:center; text-align:center; padding:28px 0; }
+.orbit { width:132px; height:132px; border:1px solid #bfd8d9; border-radius:50%; display:grid; place-items:center; margin-bottom:24px; }
+.orbit::before { content:""; border:1px solid #8ab9bd; width:88px; height:88px; border-radius:50%; }
+.orbit span { position:absolute; width:32px; height:32px; border:2px solid var(--teal); border-radius:50%; }
+h2 { margin:0; font-size:27px; line-height:1.45; color:var(--sea); font-weight:600; }
+.sub { margin:12px 0 0; font-size:14px; max-width:255px; }
+.meta { font-size:13px; margin:16px 0 0; color:var(--sea); }
+.actions { display:flex; gap:12px; }
+button { font:inherit; cursor:default; border:0; padding:15px 16px; border-radius:16px; font-weight:600; min-height:56px; background:var(--teal); color:#fff; width:100%; }
+.secondary { background:transparent; color:var(--teal); border:1px solid var(--teal); }
+.quiet { background:#fff; color:var(--sea); }
+.prep-link { display:block; text-align:center; margin:12px 0 0; font-size:13px; color:var(--sea); text-decoration:underline; }
+.consent { font-size:12px; line-height:1.75; margin:0 0 15px; text-align:center; }
+.state { display:inline-block; font-size:12px; border:1px solid var(--border); border-radius:6px; padding:3px 8px; margin-top:18px; }
+.error { color:var(--amber); }
+.foot { font-size:13px; margin:13px 0 0; }
+.dialogue { border-top:1px solid var(--border); margin-top:36px; padding-top:23px; display:grid; grid-template-columns:1fr 1fr; gap:30px; }
+.dialogue h3 { margin:0 0 9px; font-size:17px; color:var(--sea); }
+.dialogue p { margin:6px 0; font-size:14px; }
+.speaker { display:inline-block; min-width:48px; color:var(--teal); font-weight:650; }
+.note { font-size:12px; margin:26px 0 0; color:var(--sea); }
+@media(max-width:950px) { .screens { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+@media(max-width:630px) { main { padding:28px 20px; } h1 { font-size:28px; } .screens,.dialogue { grid-template-columns:1fr; } .phone { min-height:600px; } }
+</style>
+<main>
+  <div class="eyebrow">SONAR · 语音优先设计 · 2026.10.25</div>
+  <h1>开始之后，只需说话。</h1>
+  <p class="intro">先说想做什么，声呐再决定怎样查、向谁问、何时把回应接回来。屏幕只呈现状态；正常交流不需要选模式、翻任务或操作消息。</p>
+  <div class="screens">
+    <section>
+      <p class="caption">01 / 常用启动页</p>
+      <div class="phone">
+        <div class="system"><span>09:41</span><span>语音已就绪</span></div>
+        <p class="brand">声呐</p>
+        <div class="location">手机真实位置 · 模力社区附近</div>
+        <div class="center">
+          <div class="orbit" aria-hidden="true"><span></span></div>
+          <h2>关心的事，<br>直接说。</h2>
+          <p class="sub">找消息，问现场，听回应。</p>
+        </div>
+        <p class="consent">问人、转告或回应时，才把原声发给别人。<br>相关原声自动播；有相关提问时，愿意再答。</p>
+        <button type="button">开始</button>
+        <span class="prep-link">连接与隐私</span>
+      </div>
+      <p class="foot">首次使用另有系统权限与简短说明。已有私人偏好继续有效。</p>
+    </section>
+    <section>
+      <p class="caption">02 / 会话中的状态镜像</p>
+      <div class="phone">
+        <div class="system"><span>09:43</span><span>麦克风开启</span></div>
+        <p class="brand">声呐</p>
+        <div class="location">手机真实位置 · 模力社区附近</div>
+        <div class="center">
+          <div class="orbit" aria-hidden="true"><span></span></div>
+          <h2>等现场回应</h2>
+          <p class="sub">模力社区 · 现在还能停车吗</p>
+          <p class="meta">你可以继续说其他事。</p>
+        </div>
+        <p class="consent">可以熄屏。你开口时，声音先让路。</p>
+        <div class="actions"><button class="quiet" type="button">安静</button><button class="secondary" type="button">结束</button></div>
+      </div>
+      <p class="foot">两个触控按钮是应急兜底，语音主流程不需要点它们。</p>
+    </section>
+    <section>
+      <p class="caption">03 / 真实能力不足时</p>
+      <div class="phone">
+        <div class="system"><span>09:41</span><span>麦克风关闭</span></div>
+        <p class="brand">声呐</p>
+        <div class="location">尚未开始</div>
+        <div class="center">
+          <span class="state error">离线停声未就绪</span>
+          <h2 style="margin-top:24px">免提暂不可用</h2>
+          <p class="sub">请在停车时完成语音检查。</p>
+          <p class="meta">当前没有采集或公开声音。</p>
+        </div>
+        <button type="button">检查语音</button>
+        <span class="prep-link">连接与隐私</span>
+      </div>
+      <p class="foot">不可用时说明原因，不把使用者带回五种模式和多层菜单。</p>
+    </section>
+  </div>
+  <div class="dialogue">
+    <section>
+      <h3>从发问到追问，不离开对话</h3>
+      <p><span class="speaker">你</span>“帮我问问模力社区，现在还能停车吗？”</p>
+      <p><span class="speaker">声呐</span>查合法信息、联系合适的人，等回应时保持安静。</p>
+      <p><span class="speaker">车友</span>“东门还有，刚才进去了一辆。”（真人原声）</p>
+      <p><span class="speaker">你</span>“问他东门从哪条路进。”</p>
+    </section>
+    <section>
+      <h3>参与意愿，用人话表达</h3>
+      <p><span class="speaker">声呐</span>“有人问模力社区东门还排队吗？”</p>
+      <p><span class="speaker">你</span>“帮我回他，排两辆，很快。”</p>
+      <p><span class="speaker">你</span>“今天别再问我了。”</p>
+      <p><span class="speaker">声呐</span>“好，今天不再邀请你回答。”</p>
+    </section>
+  </div>
+  <p class="note">静态设计预览，无录音、联网或播放行为。例句为设计示例，不表示现场事实。首次说明、连接与隐私、系统权限及语音异常按 EXPERIENCE.md 定义；三态页面由 DESIGN.md 与 EXPERIENCE.md 共同约束。</p>
+</main>
+</html>

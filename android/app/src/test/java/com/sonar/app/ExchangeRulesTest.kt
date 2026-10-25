@@ -33,9 +33,9 @@ class ExchangeRulesTest {
     @Test fun longSpeechIsFlaggedAndNeverSilentlySplitIntoNewPublicUtterances() {
         val chunks = mutableListOf<Pair<ByteArray, Boolean>>()
         val vad = SpeechSegments({}, { bytes, cut -> chunks.add(bytes to cut) })
-        repeat(900) { vad.accept(frame(3000)) }
+        repeat(1700) { vad.accept(frame(3000)) }
         assertEquals(1, chunks.size)
-        assertEquals(256000, chunks.single().first.size)
+        assertEquals(960000, chunks.single().first.size)
         assertTrue(chunks.single().second)
         assertTrue(vad.active) // Still speaking after the bounded clip; playback must keep yielding.
         repeat(60) { vad.accept(frame(0)) }
@@ -84,11 +84,13 @@ class ExchangeRulesTest {
             val api = HttpSonarApi(server.url("/").toString(), "test-device-token", clock, true)
             server.enqueue(MockResponse().setBody("""{"session":{"id":"s","revision":1,"auto_publish":true},"server_time":"2026-10-25T00:00:00Z"}"""))
             val start = json("client_request_id" to "11111111-1111-4111-8111-111111111111", "expected_revision" to 1,
-                "place_id" to "road", "auto_publish" to true, "auto_play" to true)
+                "place_id" to "road", "auto_publish" to true, "auto_play" to true, "network_enabled" to true)
             assertEquals("s", api.startExchange(start).getJSONObject("session").getString("id"))
             val request = server.takeRequest()
             assertEquals("/v1/exchange/sessions", request.path)
-            assertFalse(JSONObject(request.body.readUtf8()).has("user_id"))
+            val authorization = JSONObject(request.body.readUtf8())
+            assertFalse(authorization.has("user_id"))
+            assertTrue(authorization.getBoolean("network_enabled"))
             audio.writeBytes(Wav.synthetic())
             server.enqueue(MockResponse().setBody("""{"turn_id":"t","status":"published","post_id":"p","action":"scene","server_time":"2026-10-25T00:00:00Z"}"""))
             val result = api.exchangeUpload("s", audio, json("client_request_id" to "22222222-2222-4222-8222-222222222222",
