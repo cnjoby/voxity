@@ -9,10 +9,10 @@ android {
     compileSdk = 35
     defaultConfig {
         applicationId = "com.sonar.app"
-        minSdk = 26
+        minSdk = 29
         targetSdk = 35
-        versionCode = 9
-        versionName = "0.2.3"
+        versionCode = 17
+        versionName = "0.3.6"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     buildTypes { release { isMinifyEnabled = false } }

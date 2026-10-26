@@ -306,7 +306,10 @@ class TaskStore(context: Context, scope: String) {
     }
 
     fun excludedDeliveryIds(): List<String> = prefs.all.entries
-        .filter { (key, value) -> value == true && (key.startsWith("defer:") || key.startsWith("attempt:")) }
+        // Visit deliveries reuse their ID across visits. Filter their current
+        // visit key locally; an older visit must not hide the server's new one.
+        .filter { (key, value) -> value == true && !key.contains(":visit:") &&
+            (key.startsWith("defer:") || key.startsWith("attempt:")) }
         .sortedBy { if (it.key.startsWith("defer:")) 0 else 1 }
         .map { it.key.substringAfter(":").substringBefore(":") }.distinct().take(256)
 

@@ -1,6 +1,6 @@
 # 声呐 Sonar｜当前实现架构、模块规格与分工
 
-核对日期：2026-10-26。范围为本仓库当前源码：Android 0.2.3/code9，以及包含会话优先与天气修复的服务端。本文件描述已落在代码中的边界；[产品架构](product-architecture.md)中的事件系统、治理与商业试点规划不因此视为已交付。运行入口见[运行指南](../RUNNING.md)。
+核对日期：2026-10-26。范围为本仓库当前源码：Android 0.3.0/code11，以及包含单次语音上行、终端托管业务动作、Opus和回复修复的服务端；[实现与验收记录](../development/low-latency-opus-20261026.md)区分源码、部署和实机状态。本文件描述已落在代码中的边界；[产品架构](product-architecture.md)中的事件系统、治理与商业试点规划不因此视为已交付。运行入口见[运行指南](../RUNNING.md)。
 
 ## 1. 部署与调用关系
 
@@ -24,6 +24,8 @@ flowchart TB
 
 ## 2. 服务端模块规格
 
+普通车位询问在会话已授权问人且地点明确时，直接提交本轮原声，即使已有回答也不静默改为私人查询，不再追问是否询问在场的人。明确说“查一下／只想知道／不问人”的车位查询保持私有，查无信息也不自动公开。真人原声来源的私人查询返回可执行的play_audio动作，保留来源和时效校验。Android 提示“正在将问题转发给〔地点〕在场的人”，设备接收状态仍以实际回执为准。地点缺失或同名歧义仍需澄清；其他私人查询的工具失败继续沿用原有问人确认。
+
 下表“负责角色”为交接所需的责任划分，具体成员姓名未在本项目中确认。
 
 | 模块 / 源码 | 输入与输出 | 持久状态与关键约束 | 负责角色 / 验证入口 |
@@ -40,7 +42,7 @@ flowchart TB
 | 地点与远程范围：`geo.py`、`remote_places.py`、`place_migration.py` | GPS 样本或明确远程 POI → 地点、资格、园区范围及工具结果 | GPS 与远程身份分开；坐标时效和精度校验；迁移保留历史 | 后端与定位 / `test_location.py`、`test_remote_places.py`、`test_place_migration.py`、`test_park_questions.py` |
 | 声音与公告：`voices.py` | 录音、用途、频道授权及有效期 → 公开声音、替代/撤回、收听项 | 运营权限按频道核验；长期须知需明确 validity_policy；合成来源单独标记 | 后端与运营 / `test_voice_matching.py`、`test_standing_notices.py` |
 | 注意力与模型：`decision.py`、`attention_worker.py` | 合法候选与本人关注 → 模型 notify/defer/ignore 标记 | 当前有效 question 邀请采用 conversation_first，模型不阻断；安静、资格、权限和期限仍是硬约束；scene 保留相关性筛选 | 后端与模型接入 / `test_attention_flow.py`、`test_decision.py`、`test_conversation_first.py` |
-| 音频与持久化：`audio.py`、`storage.py`、`schema.sql` | 完整 WAV 与事务操作 → 不可变音频及一致数据库 | 16kHz/单声道/16-bit PCM、最长 30 秒、文件最多 1000 KiB，multipart 总体 1 MiB；SQLite WAL 与外键，新增迁移保留旧数据 | 后端 / `test_core.py`、`test_async_storage.py` |
+| 音频与持久化：`audio.py`、`storage.py`、`schema.sql` | Ogg Opus或完整WAV与事务操作 → 不可变音频及一致数据库 | 单声道Opus或16kHz/16-bit PCM，实际解码最长30秒；文件最多1000KiB，multipart总体1MiB；压缩原声原样保存/下载；SQLite WAL与外键 | 后端 / `test_opus.py`、`test_core.py`、`test_async_storage.py` |
 | MCP：`mcp.py` | 独立 Bearer + 可信 Device/Agent/Session → 受限业务工具 | Streamable HTTP 与旧 SSE；每次核验身份和归属；无设备上下文不能操作个人状态 | 平台接入与后端 / `test_mcp.py`、[平台记录](../development/linx-platform.md) |
 | 配置、导入与运维：`config.py`、`cli.py`、`operator_cli.py`、`demo_audio.py`、`poi_notices.py` | 本地配置、授权命令与合成素材清单 → 初始化、授权或幂等导入 | 凭证不入库明文、不输出；素材哈希核对；导入须显式执行 | 后端与发布 / `test_demo_audio.py`、`test_standing_notices.py` |
 
@@ -55,11 +57,11 @@ flowchart TB
 | 界面：`MainActivity.kt`、`SonarScreen.kt`、`ExchangePanel.kt`、`VoicePanel.kt`、`LinxPanel.kt` | 准备、开始、活跃/安静状态、地点及设置 | 用户显式开始，不把配置过程混入行车交流；Android/体验 |
 | 界面编排：`SonarViewModel.kt`、`Models.kt` | API/配置/定位结果 → UI 状态与用户动作 | 不把请求成功等同实际播放；Android |
 | 前台语音运行：`ExchangeService.kt` | 采集轮次、STT、服务端动作、轮询交付 → 私有回应或原声播放 | 用户动作启动；通知/生命周期管理；非 sticky 重启；本地安静与终止优先；Android |
-| 音频：`AudioCoordinator.kt`、`ExchangeCapture.kt`、`SpeechSegments.kt` | PCM、VAD 分句、音频焦点及 WAV → 有界录音或播放结果 | 录音/播放互斥、系统打断、单轮上限和静音边界；Android/音频 |
+| 音频：`AudioCoordinator.kt`、`ExchangeCapture.kt`、`SpeechSegments.kt`、`OpusFiles.kt` | PCM帧、VAD、音频焦点、Ogg Opus → 有界录音、压缩传输或流式播放 | 单麦克风/单路播放、系统打断、单轮上限和静音边界；流式回声参考；Android/音频 |
 | 本地控制与回声：`LocalSpeechCommands.kt`、`PlaybackEchoGuard.kt` | 离线中文识别与播放上下文 → 控制动作或回声抑制 | Vosk 固定校验；网络失败仍需本地停止；真实车内 AEC/误触发单验；Android/音频 |
 | 反馈与来源：`VoiceFeedback.kt`、`AgentSpeech.kt`、`SourcePresentation.kt` | 提交结果、Agent 文本、来源信息 → 回执提示、中文 TTS 和显示 | 真人回复保留原 WAV；Agent 使用合成语音；原声增益为播放派生，不覆盖服务器原文件；Android |
 | 业务网络：`SonarApi.kt` | 业务 Token、冻结请求 ID/revision → HTTP 结果或已鉴权音频 | 不混用灵矽凭证；不凭旧版本播放；Android/后端共同维护契约 |
-| 灵矽接入：`LinxGateway.kt`、`LinxSession.kt`、`LinxCodec.kt`、`LinxState.kt` | 设备绑定、WSS 和音频编解码 → STT/助手结果 | OTA/WSS 身份独立；重连与超时不自动公开发言；Android/平台接入 |
+| 灵矽接入：`LinxGateway.kt`、`LinxSession.kt`、`LinxCodec.kt`、`CapturingTurn.kt`、`StreamingOpusEncoder.kt`、`StreamingOpusDecoder.kt` | 设备绑定、实时帧与WSS → 同轮STT/流式私人回复 | 一轮一次识别，业务结果控制出声；OTA/WSS身份独立；超时不自动公开；Android/平台接入 |
 | 本地状态：`TaskStore.kt`、`AckReconciler.kt` | 私有设备配置、草稿、回执 → 加密配置和重试台账 | Keystore 保护配置；任务按服务器/用户范围隔离；未知结果核对、不盲目重发；Android |
 | 定位：`PhoneLocation.kt` | 系统定位与精度 → 明确位置样本 | 权限、时效、真实位置/远程选择区分；Android/定位 |
 

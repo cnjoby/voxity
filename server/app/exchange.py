@@ -2,21 +2,25 @@
 
 import asyncio
 import json
+import logging
 import math
 import re
 import secrets
+import time
 from datetime import UTC, datetime
 
 import httpx
 from pydantic import TypeAdapter
 
 from .agent import AgentRules, clean, intent
-from .audio import validate_wav
+from .audio import validate_audio
 from .contracts import SessionCapabilities, session_capabilities, turn_result
 from .errors import Problem
 from .models import Draft
 from .storage import digest
 from .voice_first import VoiceFirstRules, explicit_reply, explicit_share
+
+latency_log = logging.getLogger("sonar.latency")
 
 
 def stamp(value):
@@ -163,6 +167,9 @@ class ExchangeRules(VoiceFirstRules, AgentRules):
                 "interaction_mode": "voice_first",
                 "remote": self.profile_row(db, user)["source"] == "remote_place",
                 "voice_policy": self.voice_policy(db, row) or {},
+                "client_managed_voice": (self.voice_policy(db, row) or {}).get(
+                    "client_managed_voice", False
+                ),
                 "participation_enabled": self.voice_invite_allowed(db, self.profile_row(db, user)),
                 "task_updates": [
                     {
@@ -183,6 +190,12 @@ class ExchangeRules(VoiceFirstRules, AgentRules):
         }
 
     def start_exchange(self, db, user, data):
+        if data.client_managed_voice and not self.managed_voice_available(db, user):
+            raise Problem(
+                503,
+                "VOICE_PLATFORM_NOT_VERIFIED",
+                "私人语音平台的工具配置尚未核验，请先完成配置检查",
+            )
         if not data.place_id:
             profile = self.profile_row(db, user)
             place_id = profile["place_id"]
@@ -194,6 +207,8 @@ class ExchangeRules(VoiceFirstRules, AgentRules):
                 )
             data = data.model_copy(update={"place_id": place_id})
         fields = data.model_dump(mode="json")
+        if not data.client_managed_voice:
+            fields.pop("client_managed_voice")  # Preserve existing session fingerprints.
         if data.capabilities is None:
             fields.pop("capabilities")
         if not data.network_enabled:
@@ -271,6 +286,14 @@ class ExchangeRules(VoiceFirstRules, AgentRules):
         if self.profile_row(db, user)["mode"] == "quiet":
             db.execute("UPDATE exchange_sessions SET state='paused' WHERE id=?", (sid,))
         return self.exchange_view(db, user, sid)
+
+    def managed_voice_available(self, db, user):
+        row = db.execute("SELECT agent_id FROM users WHERE id=?", (user,)).fetchone()
+        return bool(
+            row
+            and row["agent_id"]
+            and row["agent_id"] in self.settings.managed_voice_verified_agents
+        )
 
     def change_exchange(self, db, user, sid, data):
         row = self.exchange_row(db, user, sid)
@@ -454,14 +477,22 @@ class ExchangeRules(VoiceFirstRules, AgentRules):
     async def submit_exchange(self, user, sid, data, audio):
         return await self.submit_agent_turn(user, sid, data, audio)
 
-    async def submit_agent_turn(self, user, sid, data, audio=None):
+    async def submit_agent_turn(self, user, sid, data, audio=None, *, from_mcp=False):
         """Common application entry for recorded HTTP turns and text HTTP/MCP turns."""
+        started = time.monotonic()
         if audio is not None:
-            validate_wav(audio)
+            await asyncio.to_thread(validate_audio, audio)
+        validated = time.monotonic()
         audio = audio or b""
         fields = data.model_dump(mode="json")
+        if "captured_context_post_id" not in data.model_fields_set:
+            fields.pop("captured_context_post_id")
         fingerprint = digest(sid.encode() + json.dumps(fields, sort_keys=True).encode() + audio)
         async with self.async_scope() as db:
+            if from_mcp:
+                from .mcp import ProtectedMCP
+
+                ProtectedMCP(self).require_mutation_owner(db, user)
             old = db.execute(
                 "SELECT * FROM exchange_turns WHERE user_id=? AND client_request_id=?",
                 (user, str(data.client_request_id)),
@@ -471,6 +502,13 @@ class ExchangeRules(VoiceFirstRules, AgentRules):
                     raise Problem(409, "IDEMPOTENCY_CONFLICT", "同一录音不能对应其他内容或会话")
                 return self.exchange_turn_view(db, user, old["id"])
             session = self.require_exchange(db, user, sid, data.expected_session_revision)
+            if (
+                "captured_context_post_id" in data.model_fields_set
+                and data.captured_context_post_id != session["context_post_id"]
+            ):
+                raise Problem(
+                    409, "CONTEXT_CHANGED", "录音期间回复对象已改变，本轮保持私有，请重听后回复"
+                )
             caps = session_capabilities(session)
             if session["capabilities_json"] is None and not session["auto_publish"]:
                 raise Problem(403, "EXCHANGE_NOT_AUTHORIZED", "本次会话未授权此操作")
@@ -561,6 +599,7 @@ class ExchangeRules(VoiceFirstRules, AgentRules):
             self.begin_task_turn(
                 db, user, session, turn_id, data, state, reuse_context=not agent_route
             )
+        prepared = time.monotonic()
         try:
             plan = (
                 await self.plan_voice_turn(user, dict(session), data, audio, pending, state)
@@ -606,10 +645,22 @@ class ExchangeRules(VoiceFirstRules, AgentRules):
             action, plan = "defer", {"action": "reject", "reason": exc.code}
         except Exception:
             action, plan = "defer", None
+        planned = time.monotonic()
         async with self.async_scope() as db:
-            return self.finish_exchange_turn(
+            result = self.finish_exchange_turn(
                 db, user, sid, turn_id, data, audio, state, action, plan
             )
+        latency_log.info(
+            "turn_timing request=%s validation_ms=%d prepare_ms=%d plan_ms=%d commit_ms=%d action=%s status=%s",
+            data.client_request_id,
+            (validated - started) * 1000,
+            (prepared - validated) * 1000,
+            (planned - prepared) * 1000,
+            (time.monotonic() - planned) * 1000,
+            result.get("action"),
+            result.get("status"),
+        )
+        return result
 
     def finish_exchange_turn(
         self, db, user, sid, turn_id, data, audio, snapshot, action, plan=None
@@ -730,10 +781,12 @@ class ExchangeRules(VoiceFirstRules, AgentRules):
                         topics=["现场交流"],
                         valid_from=stamp(data.recorded_at.timestamp()),
                         valid_until=stamp(
-                            data.recorded_at.timestamp()
-                            + min(
-                                self.settings.exchange_observation_ttl,
-                                self.settings.observation_max_ttl,
+                            self.information_expiry(
+                                data.recorded_at.timestamp(),
+                                min(
+                                    self.settings.exchange_observation_ttl,
+                                    self.settings.observation_max_ttl,
+                                ),
                             )
                         ),
                     )
@@ -779,7 +832,7 @@ class ExchangeRules(VoiceFirstRules, AgentRules):
         except (Problem, ValueError) as exc:
             db.execute("ROLLBACK TO exchange_publish")
             if pid:
-                (self.store.audio_dir / f"{pid}.wav").unlink(missing_ok=True)
+                self.store.audio_path(pid).unlink(missing_ok=True)
             pid = None
             result["reason"] = exc.code if isinstance(exc, Problem) else "INVALID_DECISION"
         finally:
@@ -893,12 +946,17 @@ class ExchangeRules(VoiceFirstRules, AgentRules):
             # Stream past ineligible rows; a fixed first page must not starve valid candidates.
             place_ids = self.question_place_ids(db, session["place_id"])
             marks = ",".join("?" for _ in place_ids)
+            earliest = (
+                self.information_expiry(self.clock(), 0) - 86400
+                if self.settings.information_valid_until_day_end
+                else session["created_at"] - 30
+            )
             rows = db.execute(
                 "SELECT p.* FROM posts p WHERE p.kind IN ('scene','question') AND p.status='published' "
                 f"AND (p.target_place_id=? OR (p.kind='question' AND p.target_place_id IN ({marks}))) AND p.author_id!=? AND p.created_at>=? "
                 "AND NOT EXISTS(SELECT 1 FROM exchange_candidates c WHERE c.session_id=? "
                 "AND c.post_id=p.id AND c.profile_revision=?) ORDER BY p.created_at DESC,p.id DESC",
-                (session["place_id"], *place_ids, user, session["created_at"] - 30, sid, revision),
+                (session["place_id"], *place_ids, user, earliest, sid, revision),
             )
             for post in rows:
                 if not self.exchange_candidate(db, user, session, post):

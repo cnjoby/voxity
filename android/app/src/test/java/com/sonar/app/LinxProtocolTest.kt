@@ -14,8 +14,83 @@ import okio.ByteString
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.channels.Channel
 
 class LinxProtocolTest {
+    @Test fun routedReplyUsesOneSocketAndEmitsPcmBeforeStop() = runBlocking {
+        MockWebServer().use { server ->
+            val received = CountDownLatch(1)
+            val stopSent = AtomicBoolean(false)
+            val routeCount = AtomicInteger()
+            server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                override fun onMessage(ws: WebSocket, text: String) {
+                    val j = JSONObject(text)
+                    if (j.text("type") == "hello") ws.send(json("type" to "hello", "transport" to "websocket", "audio_params" to LinxAudioParams().hello()).toString())
+                    if (j.text("type") == "listen" && j.text("state") == "stop") {
+                        ws.send(json("type" to "stt", "text" to "聊聊今天").toString())
+                        ws.send(json("type" to "tts", "state" to "start").toString())
+                        ws.send(ByteString.of(*ByteArray(640)))
+                        check(received.await(3, TimeUnit.SECONDS))
+                        stopSent.set(true)
+                        ws.send(json("type" to "tts", "state" to "stop").toString())
+                    }
+                }
+            }))
+            val file = clip()
+            try {
+                val reply = LinxSession(allowLocal = true).exchange(file, config(server),
+                    route = { routeCount.incrementAndGet(); true }, onPcm = {
+                        assertFalse(stopSent.get()); assertEquals(640, it.bytes.size); received.countDown()
+                    })
+                assertNull(reply.audio)
+                assertEquals(1, routeCount.get())
+                assertEquals(1, server.requestCount)
+            } finally { file.delete() }
+        }
+    }
+
+    @Test fun businessRouteDiscardsUnrelatedAssistantAudio() = runBlocking {
+        MockWebServer().use { server ->
+            server(server, CopyOnWriteArrayList(), CopyOnWriteArrayList())
+            val file = clip()
+            try {
+                val reply = LinxSession(allowLocal = true).exchange(file, config(server), route = { false },
+                    onPcm = { fail("unpermitted speech played") })
+                assertNull(reply.audio)
+                assertEquals(1, server.requestCount)
+            } finally { file.delete() }
+        }
+    }
+
+    @Test fun livePcmIsUploadedBeforeRecordingEnds() = runBlocking {
+        MockWebServer().use { server ->
+            val firstFrame = CountDownLatch(1)
+            val frames = Channel<ByteArray>(10)
+            server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                override fun onMessage(ws: WebSocket, text: String) {
+                    val j = JSONObject(text)
+                    if (j.text("type") == "hello") ws.send(json("type" to "hello", "transport" to "websocket", "audio_params" to LinxAudioParams().hello()).toString())
+                    if (j.text("type") == "listen" && j.text("state") == "stop") {
+                        ws.send(json("type" to "stt", "text" to "本轮查询").toString())
+                        ws.send(json("type" to "tts", "state" to "start").toString())
+                    }
+                }
+                override fun onMessage(ws: WebSocket, bytes: ByteString) { firstFrame.countDown() }
+            }))
+            val result = async { LinxSession(allowLocal = true).exchange(null, config(server), pcmFrames = frames,
+                route = { false }, onPcm = { fail("business route must not speak") }) }
+            frames.send(ByteArray(640))
+            assertTrue(kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { firstFrame.await(3, TimeUnit.SECONDS) })
+            assertFalse(result.isCompleted)
+            frames.close()
+            assertEquals("本轮查询", result.await().transcript)
+            assertEquals(1, server.requestCount)
+        }
+    }
     private fun config(server: MockWebServer) =
         DeviceConfig(
             linxUrl = server.url("/v1/ws/").toString().replace("http://", "ws://"),

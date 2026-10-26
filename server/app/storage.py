@@ -60,6 +60,11 @@ class Database:
         db.execute("PRAGMA foreign_keys=ON")
         return db
 
+    def audio_path(self, post_id):
+        # IDs come from database rows, never raw request paths. Legacy WAVs remain valid.
+        opus = self.audio_dir / f"{post_id}.opus"
+        return opus if opus.is_file() else self.audio_dir / f"{post_id}.wav"
+
     @contextmanager
     def transaction(self):
         db = self.connect()

@@ -14,7 +14,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 
-/** Only the personal Agent's text uses TTS. Peer voices always use their original WAV. */
+/** Agent text and separate publication-time prompts use TTS; recordings stay original. */
 class AgentSpeech(private val context: Context) {
     suspend fun synthesize(text: String, output: File): File = withContext(Dispatchers.Main.immediate) {
         val ready = CompletableDeferred<Boolean>()

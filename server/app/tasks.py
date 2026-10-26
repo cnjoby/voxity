@@ -63,7 +63,7 @@ class TaskRules:
             "expired": "timed_out",
         }.get(question["question_status"], "querying")
         deadline = (
-            question["published_at"] + self.settings.audio_ttl
+            self.information_expiry(question["published_at"], self.settings.audio_ttl)
             if status == "responded"
             else question["expires_at"] or self.clock()
         )
@@ -434,7 +434,10 @@ class TaskRules:
                 question["id"],
                 question["id"],
                 "invitation",
-                min(question["expires_at"], self.clock() + self.settings.invitation_ttl),
+                min(
+                    question["expires_at"],
+                    self.information_expiry(self.clock(), self.settings.invitation_ttl),
+                ),
             )
             created += 1
             budget -= 1

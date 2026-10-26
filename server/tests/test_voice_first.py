@@ -132,20 +132,32 @@ def test_one_default_session_is_private_and_shortcuts_are_provider_ids(env):
         assert db.execute("SELECT count(*) FROM posts").fetchone()[0] == 0
 
 
-def test_ordinary_parking_offers_then_yes_publishes_original_audio_once(env):
+@pytest.mark.parametrize(
+    "text",
+    [
+        "模力社区现在还能停车吗？",
+        "问一问模力社区有没有停车位？",
+        "你帮我问一问模力社区还有车位吗？",
+    ],
+)
+def test_parking_publishes_original_audio_once_without_confirmation(env, text):
     c, s, n, a = setup_voice(env)
-    r = utter(c, a, n, transcript="模力社区现在还能停车吗？").json()
-    assert r["status"] == "clarifying" and r["agent_response"]["kind"] == "human_offer", r
+    _, _, _, b = setup_voice(env, "bob")
+    request_id = str(uuid.uuid4())
+    result = utter(c, a, n, request_id=request_id, transcript=text).json()
+    assert result["status"] == "published" and result["action"] == "question", result
+    assert result["target_place"]["id"] == MODAILY
+    repeated = utter(c, a, n, request_id=request_id, transcript=text).json()
+    assert repeated["post_id"] == result["post_id"]
     with s.scope() as db:
-        assert not db.execute("SELECT id FROM posts").fetchone()
-    yes = utter(c, a, n, transcript="好").json()
-    assert yes["status"] == "published", yes
-    assert yes["target_place"]["id"] == MODAILY
-    with s.scope() as db:
-        p = s.post(db, yes["post_id"])
-        assert p["transcript"] == "模力社区现在还能停车吗？"
+        p = s.post(db, result["post_id"])
+        assert p["transcript"] == text
         assert json.loads(p["recorded_location"])["source"] == "remote_place"
-    assert c.get("/v1/audio/" + yes["post_id"], headers=auth()).content == wav()
+        assert db.execute("SELECT count(*) FROM posts").fetchone()[0] == 1
+        assert not db.execute("SELECT 1 FROM agent_pending").fetchone()
+    items = c.get(f"/v1/exchange/sessions/{b['id']}/inbox", headers=auth("bob")).json()["items"]
+    invitation = next(i for i in items if i["payload"]["post_id"] == result["post_id"])
+    assert c.get(invitation["payload"]["audio_url"], headers=auth("bob")).content == wav()
 
 
 def test_ask_answer_followup_requires_actually_heard_context(env):
@@ -255,6 +267,94 @@ def test_continuous_sharing_is_explicit_and_can_be_revoked(env):
     assert shared["status"] == "published" and shared["action"] == "scene", shared
     assert utter(c, a, n, transcript="本次不要再分享").json()["status"] == "responded"
     assert utter(c, a, n, transcript="东门开始排队").json()["action"] == "private_chat"
+
+
+@pytest.mark.parametrize(
+    "question,expected",
+    [("模力社区附近有停车位吗？", "question"), ("帮我查一下模力社区还有车位吗？", "agent")],
+)
+def test_parking_with_an_existing_answer_still_asks_people_unless_lookup_is_explicit(
+    env, question, expected
+):
+    c, s, n, a = setup_voice(env)
+    _, _, _, b = setup_voice(env, "bob")
+    first = utter(c, b, n, "bob", transcript="帮我问问模力社区还有停车位吗？").json()
+    heard(c, a, first["post_id"])
+    answer = utter(c, a, n, transcript="还有空位，可以过来停车。").json()
+    assert answer["action"] == "answer", answer
+    result = utter(c, b, n, "bob", transcript=question).json()
+    assert result["action"] == expected, result
+    if expected == "question":
+        assert result["status"] == "published"
+        assert result["post_id"] != first["post_id"]
+        items = c.get(f"/v1/exchange/sessions/{a['id']}/inbox", headers=auth()).json()["items"]
+        assert any(i["payload"]["post_id"] == result["post_id"] for i in items)
+    else:
+        assert result["status"] == "responded"
+        assert result["agent_response"]["sources"][0]["post_id"] == answer["post_id"]
+        assert result["voice_action"]["type"] == "play_audio"
+        assert result["voice_action"]["items"][0]["post_id"] == answer["post_id"]
+        assert len(json.dumps(result, ensure_ascii=False).encode()) < 3072
+
+
+@pytest.mark.parametrize("text", ["帮我查一下模力社区还有车位吗？", "只想知道模力社区能停车吗？"])
+def test_explicit_parking_lookup_without_information_does_not_publish(env, text):
+    c, s, n, a = setup_voice(env)
+    result = utter(c, a, n, transcript=text).json()
+    assert (
+        result["status"] == "responded" and result["agent_response"]["kind"] == "no_information"
+    ), result
+    with s.scope() as db:
+        assert not db.execute("SELECT 1 FROM posts").fetchone()
+
+
+@pytest.mark.parametrize("name", ["摩利社区", "摩力社区"])
+def test_modaily_speech_alias_publishes_to_the_canonical_place(env, name):
+    c, s, n, a = setup_voice(env)
+    result = utter(c, a, n, transcript=f"{name}附近有停车位吗？").json()
+    assert result["status"] == "published", result
+    assert result["target_place"]["id"] == MODAILY
+    assert result["target_place"]["label"] == "模力社区"
+    with s.scope() as db:
+        assert s.post(db, result["post_id"])["transcript"] == f"{name}附近有停车位吗？"
+
+
+def test_same_place_questions_publish_without_replacement_confirmation(env):
+    c, s, n, a = setup_voice(env)
+    first = utter(c, a, n, transcript="模力社区还有车位吗？").json()
+    second = utter(c, a, n, transcript="帮我问一问模力社区现在能不能停车？").json()
+    assert first["status"] == second["status"] == "published", second
+    assert first["post_id"] != second["post_id"]
+    assert second["target_place"]["id"] == MODAILY
+    with s.scope() as db:
+        assert s.post(db, first["post_id"])["question_status"] == "cancelled"
+        assert s.store.audio_path(first["post_id"]).read_bytes() == wav()
+        assert not db.execute("SELECT 1 FROM agent_pending").fetchone()
+        assert s.post(db, second["post_id"])["transcript"] == "帮我问一问模力社区现在能不能停车？"
+
+
+@pytest.mark.parametrize("text", ["模力社区还有车位吗？", "人工智能岛还有车位吗？"])
+def test_old_session_waiting_question_does_not_block_new_session(env, text):
+    c, s, n, a = setup_voice(env)
+    first = utter(c, a, n, transcript="模力社区还能停车吗？").json()
+    _, _, _, latest = setup_voice(env)
+    result = utter(c, latest, n, transcript=text).json()
+    assert result["status"] == "published", result
+    with s.scope() as db:
+        assert s.post(db, first["post_id"])["question_status"] == "cancelled"
+        assert not db.execute("SELECT 1 FROM agent_pending").fetchone()
+
+
+def test_expired_task_does_not_require_replacement_confirmation(env):
+    c, s, n, a = setup_voice(env)
+    first = utter(c, a, n, transcript="模力社区还能停车吗？").json()
+    with s.scope() as db:
+        db.execute(
+            "UPDATE personal_tasks SET expires_at=? WHERE question_id=?",
+            (n[0] - 1, first["post_id"]),
+        )
+    result = utter(c, a, n, transcript="人工智能岛还有车位吗？").json()
+    assert result["status"] == "published", result
 
 
 def test_task_status_cancel_and_replacement_have_no_task_menu(env):

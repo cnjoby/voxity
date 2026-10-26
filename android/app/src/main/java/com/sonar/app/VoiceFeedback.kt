@@ -14,7 +14,7 @@ internal fun submissionReceipt(result: JSONObject): String {
     val scope = result.optJSONObject("match_scope")
     val area = if (scope?.text("kind") == "park") "，按${scope.text("label")}园区范围询问" else ""
     val received = result.optJSONObject("dispatch")?.optInt("device_received", 0) ?: 0
-    return "问题已提交到${target}${area}。" +
+    return "正在将问题转发给${target}在场的人${area}。" +
         if (received > 0) "已有现场设备确认收到邀请，等待回应。" else "尚未有现场设备确认接收，正在等待回应。"
 }
 

@@ -3,9 +3,11 @@ import secrets
 import time
 import wave
 from contextlib import asynccontextmanager, contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from datetime import time as day_time
+from zoneinfo import ZoneInfo
 
-from .audio import validate_wav
+from .audio import duration, is_opus, validate_audio
 from .config import Settings
 from .decision import BambooDecision
 from .errors import Problem
@@ -31,6 +33,17 @@ def stamp(value):
 
 def ident(prefix):
     return f"{prefix}_{secrets.token_hex(12)}"
+
+
+def publication_intro(published_at, now):
+    seconds = int(now - published_at)
+    if seconds < -10:
+        return ""
+    if seconds < 60:
+        return "刚刚发布。"
+    if seconds < 3600:
+        return f"{seconds // 60}分钟前发布。"
+    return f"{seconds // 3600}小时前发布。"
 
 
 class Service(
@@ -63,6 +76,13 @@ class Service(
 
     def now(self):
         return {"server_time": stamp(self.clock())}
+
+    def information_expiry(self, published_at, ttl):
+        if not self.settings.information_valid_until_day_end:
+            return published_at + ttl
+        zone = ZoneInfo("Asia/Shanghai")
+        tomorrow = datetime.fromtimestamp(published_at, zone).date() + timedelta(days=1)
+        return datetime.combine(tomorrow, day_time(), zone).timestamp()
 
     def migrate_legacy_focus(self):
         # The old Android quiet toggle wrote this status into the semantic focus.
@@ -469,7 +489,7 @@ class Service(
         return self.post(db, qid)
 
     def draft(self, db, user, meta, audio):
-        validate_wav(audio)
+        validate_audio(audio)
         fields = meta.model_dump(mode="json", exclude_none=True)
         if isinstance(meta, VoiceDraft):
             # Preserve old immutable request fingerprints when new fields use legacy defaults.
@@ -549,7 +569,7 @@ class Service(
                 "UPDATE posts SET recorded_location=? WHERE id=?", (fix.model_dump_json(), pid)
             )
         # Generated names, never user-controlled paths. File exists before transaction commits.
-        path = self.store.audio_dir / f"{pid}.wav"
+        path = self.store.audio_dir / f"{pid}{'.opus' if is_opus(audio) else '.wav'}"
         try:
             path.write_bytes(audio)
         except OSError:
@@ -708,7 +728,11 @@ class Service(
                     raise Problem(409, "QUESTION_ACTIVE", "请先结束当前提问")
                 db.execute(
                     "UPDATE posts SET status='published',question_status='waiting',published_at=?,expires_at=? WHERE id=?",
-                    (self.clock(), self.clock() + self.settings.question_ttl, pid),
+                    (
+                        self.clock(),
+                        self.information_expiry(self.clock(), self.settings.question_ttl),
+                        pid,
+                    ),
                 )
                 q = self.post(db, pid)
                 self.ensure_question_task(db, q)
@@ -740,7 +764,7 @@ class Service(
                     q["id"],
                     pid,
                     "audio",
-                    self.clock() + self.settings.audio_ttl,
+                    self.information_expiry(self.clock(), self.settings.audio_ttl),
                 )
         p = self.post(db, pid)
         self.task_on_message(db, p)
@@ -798,10 +822,11 @@ class Service(
             "published_at": stamp(p["published_at"]),
             "audio_url": f"/v1/audio/{p['id']}",
         }
+        if p["published_at"] is not None:
+            payload["playback_intro"] = publication_intro(p["published_at"], self.clock())
         try:
-            with wave.open(str(self.store.audio_dir / f"{p['id']}.wav"), "rb") as audio:
-                payload["duration_seconds"] = audio.getnframes() / audio.getframerate()
-        except (OSError, wave.Error):
+            payload["duration_seconds"] = duration(self.store.audio_path(p["id"]))
+        except (OSError, wave.Error, ValueError):
             pass
         return payload
 
@@ -974,12 +999,13 @@ class Service(
             q = self.post(db, p["reply_to"])
             return (
                 q["author_id"] == user
-                and p["published_at"] + self.settings.audio_ttl > self.clock()
+                and self.information_expiry(p["published_at"], self.settings.audio_ttl)
+                > self.clock()
             )
         if (
             p["kind"] == "question"
             and p["question_status"] == "answered"
-            and p["published_at"] + self.settings.audio_ttl > self.clock()
+            and self.information_expiry(p["published_at"], self.settings.audio_ttl) > self.clock()
         ):
             if db.execute(
                 "SELECT 1 FROM posts WHERE kind='answer' AND reply_to=? AND author_id=? AND status='published'",
@@ -1098,7 +1124,7 @@ class Service(
             return {"delivery_id": queued["delivery"]["id"], "state": queued["delivery"]["state"]}
         qid = post["reply_to"] or post["id"]
         if post["kind"] == "answer":
-            expires = post["published_at"] + self.settings.audio_ttl
+            expires = self.information_expiry(post["published_at"], self.settings.audio_ttl)
         else:
             invite = db.execute(
                 "SELECT expires_at FROM deliveries WHERE recipient_id=? AND post_id=? AND type='invitation' AND state IN ('pending','prompted')",

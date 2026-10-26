@@ -52,7 +52,10 @@ class InformationRules:
                 return None
             if post["kind"] in ("answer", "reply"):
                 recorded = epoch(meta.get("recorded_at")) or post["published_at"]
-                if recorded + self.settings.observation_max_ttl <= self.clock():
+                if (
+                    self.information_expiry(recorded, self.settings.observation_max_ttl)
+                    <= self.clock()
+                ):
                     return None
         elif purpose == "knowledge" and not historical:
             return None

@@ -3,6 +3,8 @@ package com.sonar.app
 import android.Manifest
 import android.content.Context
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.lifecycle.ViewModelProvider
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.rule.GrantPermissionRule
@@ -16,6 +18,9 @@ import kotlin.coroutines.intrinsics.COROUTINE_SUSPENDED
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.Dispatcher
@@ -47,6 +52,8 @@ class VoiceRuntimeDeviceTest {
     private val invalidSyntheticContext = AtomicBoolean()
     private val timedOut = AtomicBoolean()
     private val sessionError = AtomicInteger()
+    private val questionError = AtomicInteger(404)
+    private val questionLookups = AtomicInteger()
     private val saved = mutableMapOf<String, Map<String, *>>()
     private var taskScope = ""
     @Volatile private var mode = "listen"
@@ -56,7 +63,7 @@ class VoiceRuntimeDeviceTest {
     private fun profile() = json("user_id" to "runtime-test", "revision" to 1, "mode" to mode,
         "assist_enabled" to true, "focus" to "停车", "presence" to json("place_id" to "B0K2KHYN77", "place_name" to "模力社区", "source" to "remote_place", "remote" to true))
     private fun session() = json("id" to "runtime", "revision" to sessionRevision, "state" to sessionState,
-        "place_id" to "B0K2KHYN77", "interaction_mode" to "voice_first", "remote" to true,
+        "place_id" to "B0K2KHYN77", "interaction_mode" to "voice_first", "client_managed_voice" to true, "remote" to true,
         "context_post_id" to null, "quiet" to (mode == "quiet"), "voice_policy" to json("private_default" to true,
             "continuous_share" to false, "last_audio_post_id" to lastAudioId, "heard_post_id" to null),
         "task_updates" to JSONArray(if (timedOut.get()) listOf(json("id" to "current-timeout", "revision" to 2,
@@ -75,6 +82,11 @@ class VoiceRuntimeDeviceTest {
                     return when {
                         path == "/v1/me" -> response(json("profile" to profile(), "place_shortcuts" to JSONArray(listOf(json("id" to "B0K2KHYN77", "label" to "模力社区"))), "recent_question_ids" to JSONArray()))
                         path == "/v1/me/remote-place" -> response(json("profile" to profile()))
+                        path == "/v1/questions/deleted-question" -> {
+                            questionLookups.incrementAndGet()
+                            response(json("error" to json("code" to "NOT_FOUND", "message" to "内容不存在",
+                                "retryable" to (questionError.get() >= 500)))).setResponseCode(questionError.get())
+                        }
                         path == "/v1/me/context" -> {
                             if (offline.get()) return MockResponse().setResponseCode(503)
                             mode = JSONObject(request.body.readUtf8()).text("mode")
@@ -162,16 +174,59 @@ class VoiceRuntimeDeviceTest {
     }
 
     @Suppress("UNCHECKED_CAST")
-    private fun inject(service: ExchangeService, asset: String) {
+    private fun inject(service: ExchangeService, asset: String, localFailure: Boolean = false) {
         val bytes = testContext.assets.open("control/$asset.wav").use { it.readBytes() }
         val type = Class.forName("com.sonar.app.ExchangeService\$Captured")
         val constructor = type.declaredConstructors.single().apply { isAccessible = true }
         val epoch = ExchangeService::class.java.getDeclaredField("epoch").apply { isAccessible = true }.getInt(service)
-        val captured = constructor.newInstance(bytes.copyOfRange(44, bytes.size), false, false, epoch, Instant.now().toString(), null)
+        val runtimeScope = ExchangeService::class.java.getDeclaredField("scope").apply { isAccessible = true }.get(service) as kotlinx.coroutines.CoroutineScope
+        val commands = ExchangeService::class.java.getDeclaredField("commands").apply { isAccessible = true }.get(service) as LocalSpeechCommands
+        val config = ExchangeService::class.java.getDeclaredField("config").apply { isAccessible = true }.get(service) as DeviceConfig
+        val turn = CapturingTurn(runtimeScope, commands, config, cloud = false, contextPostId = null,
+            recognizeLocal = if (localFailure) { _ -> throw java.io.IOException("isolated local ASR failure") } else commands::recognizeFrames)
+        val pcm = bytes.copyOfRange(44, bytes.size)
+        for (offset in pcm.indices step 640) turn.accept(pcm.copyOfRange(offset, minOf(offset + 640, pcm.size)))
+        turn.finish()
+        val captured = constructor.newInstance(pcm, false, false, epoch, Instant.now().toString(), null, turn)
         val pending = ExchangeService::class.java.getDeclaredField("localPending").apply { isAccessible = true }.get(service) as AtomicInteger
         val channel = ExchangeService::class.java.getDeclaredField("segments").apply { isAccessible = true }.get(service) as Channel<Any>
         pending.incrementAndGet()
         check(channel.trySend(captured).isSuccess)
+    }
+
+    private fun cacheDeletedQuestion(status: Int): SonarViewModel {
+        val vm = ViewModelProvider(compose.activity)[SonarViewModel::class.java]
+        questionError.set(status)
+        compose.runOnIdle {
+            TaskStore(context, taskScope).questionId = "deleted-question"
+            vm.configure(ConfigStore(context).load(), false)
+        }
+        return vm
+    }
+
+    @Test fun deletedCachedQuestionDoesNotBlockStartingVoiceSession() {
+        val vm = cacheDeletedQuestion(404)
+        compose.waitUntil(15000) { questionLookups.get() > 0 && vm.state.value.connected &&
+            TaskStore(context, taskScope).questionId == null }
+        assertNull(vm.state.value.question)
+        compose.onNodeWithTag("voice-start").assertIsEnabled()
+        begin()
+        assertTrue(requests.contains("POST /v1/exchange/sessions"))
+    }
+
+    @Test fun goneCachedQuestionRecoversTheConnection() {
+        val vm = cacheDeletedQuestion(410)
+        compose.waitUntil(15000) { questionLookups.get() > 0 && vm.state.value.connected &&
+            TaskStore(context, taskScope).questionId == null }
+        compose.onNodeWithTag("voice-start").assertIsEnabled()
+    }
+
+    @Test fun temporaryQuestionFailureKeepsTheCachedIdForRetry() {
+        val vm = cacheDeletedQuestion(503)
+        compose.waitUntil(15000) { questionLookups.get() > 0 && !vm.state.value.connected }
+        assertEquals("deleted-question", TaskStore(context, taskScope).questionId)
+        questionError.set(404)
+        compose.waitUntil(15000) { vm.state.value.connected && TaskStore(context, taskScope).questionId == null }
     }
 
     @Test fun bundledChineseControlsStopAndResumeServiceWithoutLinxOrSuccessfulNetwork() {
@@ -186,6 +241,51 @@ class VoiceRuntimeDeviceTest {
         inject(service, "end")
         compose.waitUntil(8000) { !ExchangeRuntime.state.value.owned }
         assertFalse(requests.any { it.contains("utterances") || it.contains("linx-not-used") })
+    }
+
+    @Test fun localRecognizerFailureDoesNotKillLaterOfflineControls() {
+        val service = begin()
+        inject(service, "quiet", localFailure = true)
+        compose.waitUntil(8000) { ExchangeRuntime.state.value.message.contains("本地控制识别暂不可用") }
+        inject(service, "quiet")
+        compose.waitUntil(8000) { ExchangeRuntime.state.value.quiet }
+        assertFalse(requests.any { it.contains("utterances") })
+    }
+
+    @Test fun retryFeedbackWaitsForInFlightReplyInsteadOfTakingItsAudioGate() = runBlocking {
+        val service = begin()
+        val runtimeScope = ExchangeService::class.java.getDeclaredField("scope").apply { isAccessible = true }.get(service) as kotlinx.coroutines.CoroutineScope
+        val audio = ExchangeService::class.java.getDeclaredField("audio").apply { isAccessible = true }.get(service) as AudioCoordinator
+        val ready = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val streamed = AtomicBoolean()
+        lateinit var submit: Job
+        lateinit var feedback: Job
+        compose.runOnIdle {
+            submit = runtimeScope.launch {
+                audio.stream(mayStart = { true }, onStarted = { streamed.set(true) }, onReference = {}) { sink ->
+                    ready.complete(Unit)
+                    release.await()
+                    sink(PcmAudio(ByteArray(32000), 16000))
+                }
+            }
+            ExchangeService::class.java.getDeclaredField("submitJob").apply { isAccessible = true }.set(service, submit)
+        }
+        withTimeout(5000) { ready.await() }
+        try {
+            compose.runOnIdle {
+                ExchangeService::class.java.getDeclaredMethod("failureVoice", Int::class.javaPrimitiveType, Boolean::class.javaPrimitiveType)
+                    .apply { isAccessible = true }.invoke(service, R.raw.voice_retry, false)
+                feedback = ExchangeService::class.java.getDeclaredField("playerJob").apply { isAccessible = true }.get(service) as Job
+                assertEquals(AudioMode.IDLE, audio.gate.mode)
+                assertFalse(ExchangeRuntime.state.value.playing)
+            }
+            release.complete(Unit)
+            withTimeout(15000) { submit.join(); feedback.join() }
+            assertFalse(submit.isCancelled)
+            assertTrue(streamed.get())
+            assertFalse(ExchangeRuntime.state.value.playing)
+        } finally { release.complete(Unit); submit.cancel(); feedback.cancel() }
     }
 
     @Test fun bundledFullVocabularyModelRecognizesAllOfflineControlFixtures() = runBlocking {

@@ -16,7 +16,9 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import okio.BufferedSink
 import org.json.JSONObject
 
 class ApiFailure(
@@ -61,6 +63,8 @@ interface SonarApi {
     suspend fun exchangeInbox(id: String): JSONObject = error("此服务不支持自然交流")
     suspend fun exchangeInbox(id: String, excluded: List<String>): JSONObject = exchangeInbox(id)
     suspend fun exchangeUpload(id: String, file: File, metadata: JSONObject): JSONObject = error("此服务不支持自然交流")
+    suspend fun exchangeUpload(id: String, file: File, metadata: JSONObject, onUploaded: () -> Unit): JSONObject =
+        exchangeUpload(id, file, metadata)
 
     suspend fun upload(draft: LocalDraft): JSONObject
 
@@ -91,6 +95,7 @@ class HttpSonarApi(
             .connectTimeout(5, TimeUnit.SECONDS)
             .callTimeout(12, TimeUnit.SECONDS)
             .build(),
+    private val encodeAudio: suspend (File) -> ByteArray = OpusFiles::forUpload,
 ) : SonarApi {
     private val base =
         url.trimEnd('/').plus('/').toHttpUrl().also {
@@ -235,18 +240,30 @@ class HttpSonarApi(
             "exclude=" + java.net.URLEncoder.encode(it, "UTF-8")
         })
     override suspend fun exchangeUpload(id: String, file: File, metadata: JSONObject): JSONObject =
+        exchangeUpload(id, file, metadata) {}
+
+    override suspend fun exchangeUpload(id: String, file: File, metadata: JSONObject, onUploaded: () -> Unit): JSONObject =
         withContext(Dispatchers.IO) {
             require(file.length() in 46..(1000 * 1024)) { "录音大小无效" }
             val body = MultipartBody.Builder().setType(MultipartBody.FORM)
                 .addFormDataPart("metadata", metadata.toString())
-                .addFormDataPart("audio", "voice.wav", file.readBytes().toRequestBody("audio/wav".toMediaType()))
+                .addFormDataPart("audio", "voice.opus", encodeAudio(file).toRequestBody("audio/ogg".toMediaType()))
                 .build()
-            executeJson(request("/v1/exchange/sessions/$id/utterances").post(body).build())
+            val tracked = object : RequestBody() {
+                override fun contentType() = body.contentType()
+                override fun contentLength() = body.contentLength()
+                override fun writeTo(sink: BufferedSink) {
+                    body.writeTo(sink)
+                    sink.flush()
+                    onUploaded()
+                }
+            }
+            executeJson(request("/v1/exchange/sessions/$id/utterances").post(tracked).build())
         }
 
     override suspend fun upload(draft: LocalDraft): JSONObject =
         withContext(Dispatchers.IO) {
-            val audio = File(draft.file).readBytes()
+            val audio = encodeAudio(File(draft.file))
             require(audio.size <= 1000 * 1024) { "录音过长，请重新录制" }
             val body =
                 MultipartBody.Builder()
@@ -254,8 +271,8 @@ class HttpSonarApi(
                     .addFormDataPart("metadata", draft.metadata().toString())
                     .addFormDataPart(
                         "audio",
-                        "voice.wav",
-                        audio.toRequestBody("audio/wav".toMediaType()),
+                        "voice.opus",
+                        audio.toRequestBody("audio/ogg".toMediaType()),
                     )
                     .build()
             executeJson(request("/v1/posts/drafts").post(body).build())
@@ -276,7 +293,7 @@ class HttpSonarApi(
 
     override suspend fun download(path: String): ByteArray =
         withContext(Dispatchers.IO) {
-            withResponse(request(path).build()) { response ->
+            val received = withResponse(request(path).build()) { response ->
                 if (!response.isSuccessful)
                     throw ApiFailure(response.code, "AUDIO_ERROR", "原声下载失败（${response.code}）")
                 val body = response.body ?: throw IOException("原声为空")
@@ -294,11 +311,13 @@ class HttpSonarApi(
                     }
                 require(bytes.size <= 1000 * 1024) { "音频超过大小限制" }
                 require(
-                    bytes.size > 44 && bytes.copyOfRange(0, 4).contentEquals("RIFF".toByteArray())
+                    bytes.size > 44 && (bytes.copyOfRange(0, 4).contentEquals("RIFF".toByteArray()) ||
+                        bytes.copyOfRange(0, 4).contentEquals("OggS".toByteArray()))
                 ) {
                     "原声格式无效"
                 }
                 bytes
             }
+            OpusFiles.toWav(received, File(System.getProperty("java.io.tmpdir") ?: "/data/local/tmp"))
         }
 }

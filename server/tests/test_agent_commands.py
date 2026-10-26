@@ -167,6 +167,15 @@ def test_tool_failure_offer_cannot_escalate_private_only_authorization(env):
     assert not any(counts(svc).values())
 
 
+def test_parking_without_human_permission_does_not_publish(env):
+    c, svc, now, _ = setup(env)
+    a = start_cap(c, private_query=True)
+    result = utter(c, a, now, transcript="张江人工智能岛还有车位吗？").json()
+    assert result["status"] == "clarifying", result
+    assert result["agent_response"]["kind"] == "human_offer"
+    assert not any(counts(svc).values())
+
+
 def test_changed_authorization_or_cancelled_clarification_discards_late_results(env):
     c, svc, now, _ = setup(env)
     a = start_cap(c, private_query=True)

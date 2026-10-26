@@ -7,7 +7,8 @@ import kotlin.math.sqrt
 
 /** Reject a strongly correlated speaker-only frame before it can trigger a false interruption. */
 internal class PlaybackEchoGuard(private val now: () -> Long) {
-    private data class Reference(val samples: ShortArray, val started: Long)
+    private data class Reference(val samples: ShortArray, val started: Long, @Volatile var length: Int = samples.size,
+        val playbackPosition: (() -> Int)? = null)
     @Volatile private var reference: Reference? = null
     @Volatile private var stoppedAt = Long.MAX_VALUE
 
@@ -18,13 +19,28 @@ internal class PlaybackEchoGuard(private val now: () -> Long) {
 
     fun stop() { stoppedAt = now() }
 
+    fun beginStream(playbackPosition: (() -> Int)? = null) {
+        reference = Reference(ShortArray(16000 * 60), now(), 0, playbackPosition)
+        stoppedAt = Long.MAX_VALUE
+    }
+
+    fun appendStream(frame: PcmAudio) {
+        val ref = reference ?: return
+        val pcm = AndroidLinxCodec.resample(frame.bytes, frame.rate, 16000)
+        val length = pcm.size / 2
+        require(ref.length + length <= ref.samples.size)
+        val begin = ref.length
+        for (i in 0 until length) ref.samples[begin + i] = ((pcm[i * 2].toInt() and 255) or (pcm[i * 2 + 1].toInt() shl 8)).toShort()
+        ref.length = begin + length
+    }
+
     fun isEcho(frame: ByteArray): Boolean {
         val ref = reference ?: return false
         val time = now()
         if (time - stoppedAt > 600) return false
         if (frame.size != 640 || SpeechSegments.rms(frame) < 500) return false
-        val position = ((time - ref.started) * 16).toInt()
-        val end = minOf(position + 320, ref.samples.size - 320)
+        val position = ref.playbackPosition?.invoke() ?: ((time - ref.started) * 16).toInt()
+        val end = minOf(position + 320, ref.length - 320)
         val start = maxOf(0, position - 9600)
         if (end < start) return false
         val input = ShortArray(80) { i -> ((frame[i * 8].toInt() and 255) or (frame[i * 8 + 1].toInt() shl 8)).toShort() }

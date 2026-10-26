@@ -1,6 +1,17 @@
 # 声呐 Sonar 设计工作台
 
+- [手机回复 ESP32 失败排查（2026-10-27）](../development/esp32-reply-failure-20261027.md)：跟踪服务端039/040、Android睡眠模式与两次有声重放，以及ESP32统一Opus播放补丁；构建、主机与实机验收分别记录。
+
+- [旧内容清理后的 Android 启动恢复（2026-10-27）](../development/android-stale-question-20261027.md)：0.3.6已安装，修复旧问题404被当作断网导致“开始”不可用，3项真机回归通过。
+
+- [模力社区旧内容清理（2026-10-27）](../development/modaily-cleanup-20261027.md)：清理57条非公告内容及关联记录，保留11条公告、其他地点和账号配置；含备份位置与验证。
+
+- [车位询问直接转发（2026-10-26）](../development/parking-direct-20261026.md)：去掉问人二次确认；生产038进一步修复旧等待问题导致的重复替换确认，Android0.3.5继续使用，真人语音验收另列。
+
 2026-10-26 工程交付入口：[当前实现架构、模块规格与分工](module-specs.md) · [运行指南](../RUNNING.md) · [最新现有 PPT](../presentations/README.md)。产品规划与当前实现分别描述。
+
+- [低延迟架构优化方案（2026-10-26）](low-latency-architecture-20261026.md)：基于已有手机时间线与源码，提出一次识别、统一业务编排和流式播放；含迁移关口、性能目标与验收规格；已实现部分见下方0.3.0记录。
+- [0.3.0低延迟与Opus实现（2026-10-26）](../development/low-latency-opus-20261026.md)：已落实一次语音上行、边录边传、流式播放和压缩业务音频；复审后服务端已部署；预生成回复门禁未放行，真实平台/设备验收另列。
 
 - [2026-10-26 会话优先与天气修复](../development/conversation-first-20261026.md)：有效设备邀请立即送达，普通闲聊直接与Agent继续，天气按地点和日期查询；已部署，手机持续聊天已获用户确认，ESP32验收另列。
 
@@ -16,6 +27,10 @@
 - [Sonar 表达重组（2026-10-25）](sonar-expression-20261025.md)：基于最新语音网络基线，整理主张、四类需求、Agent 协作、路演叙事与视觉方向；表达建议，非功能交付证明。
 
 ## 开发入口
+
+- [WAV/Opus格式核对与031发布](../development/opus-interface-20261026.md)：历史素材的Android播放、ESP32的双格式合同、实际curl隔离验证和OpenAPI修正。
+
+- [低延迟/Opus复审与生产发布](../development/review-deploy-opus-20261026.md)：7项修复、256/60/20项验证、030发布、配置和159份原始音频保留，平台门禁的实际状态。
 
 - [模力社区长期公共提示](../development/modaily-entry-notices-20261025.md)：完整欢迎与入园须知、访客登记、园区客户通行；AI合成演示，直到修改或撤回。
 - [语音优先0.2.0实现与交付（2026-10-25）](../development/voice-first-20261025.md)：一个开始后语音查、问、听、回复、追问、重播、取消和结束；真实高德ID、远程来源及服务器素材。Android已打包、配套后端已部署，软件与模拟器检查通过；真人手机、ESP32和车内声学仍待验收。[已批准设计](ux-designs/ux-sonar-2026-10-25-voice-first/README.md) · [三态预览](ux-designs/ux-sonar-2026-10-25-voice-first/mockups/voice-first-states.html)。

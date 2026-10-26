@@ -1,5 +1,11 @@
 # 声呐 Sonar｜三端接口契约 v1
 
+2026-10-26生产036时效扩展：开启`SONAR_INFORMATION_VALID_UNTIL_DAY_END`后，普通公开动态信息、问题、邀请、回答按北京时间发布当日24:00截止，线程回复还受原线程截止限制；长期until_withdrawn公告保留。按服务端`expires_at`/`valid_until`验收，不使用下文旧120秒/90秒常量。原声payload新增`playback_intro`，按`published_at`计算“几分钟前/几小时前发布”；先播提示，复核状态后播原录音，原录音完成后才报played。[完整规则](day-validity-20261026.md)。
+
+2026-10-26生产031已补齐OpenAPI版本`0.3.0`与WAV/Ogg二进制响应；格式合同和隔离curl证据见[音频格式对接核对](opus-interface-20261026.md)。
+
+**2026-10-26最新版音频扩展：**业务上传支持单声道Ogg Opus（`audio/ogg`），仍按实际解码校验最长30秒与大小限制；压缩原声原样保存/返回，下载可能为`audio/ogg`，不为旧客户端转换WAV。Linx WSS使用原始Opus包，与HTTP的Ogg封装不同。会话增加`client_managed_voice`，录音metadata增加可空的`captured_context_post_id`；字段含义、MCP写操作门禁与验收见[0.3.0实现记录](low-latency-opus-20261026.md)。下文早期WAV-only描述以此扩展为准。
+
 日期：2026-10-23。服务端已有[本机运行实现](../../server/README.md)，真实平台、部署和设备仍待验收；静态 JSON 样例供客户端模拟使用。产品职责见[架构](../design/architecture.md)，开发入口见[两天计划](../../two-day-development.md)。本文是字段、枚举与失败行为的唯一开发依据。
 
 ## 1. 共同约定

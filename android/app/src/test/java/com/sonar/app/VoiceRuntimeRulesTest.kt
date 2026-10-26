@@ -6,6 +6,8 @@ import java.nio.ByteOrder
 import kotlin.math.sin
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.async
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeout
 import okhttp3.mockwebserver.SocketPolicy
 import okhttp3.mockwebserver.MockResponse
@@ -59,7 +61,7 @@ class VoiceRuntimeRulesTest {
         server.start()
         val file = File.createTempFile("sonar-long", ".wav")
         try {
-            val api = HttpSonarApi(server.url("/").toString(), "private-device-token", ServerClock { 0 }, true)
+            val api = HttpSonarApi(server.url("/").toString(), "private-device-token", ServerClock { 0 }, true, encodeAudio = { it.readBytes() })
             val original = Wav.header(960000) + ByteArray(960000)
             file.writeBytes(original)
             server.enqueue(MockResponse().setBody("""{"status":"published","action":"answer"}"""))
@@ -85,6 +87,25 @@ class VoiceRuntimeRulesTest {
             assertEquals(1, server.requestCount)
             assertTrue(pending.isCancelled)
         } finally { server.shutdown() }
+    }
+
+    @Test fun uploadCompletionIsReportedWhileServerResponseIsStillPending() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setHeadersDelay(1, java.util.concurrent.TimeUnit.SECONDS)
+                .setBody("""{"status":"responded","action":"private_chat"}"""))
+            val file = File.createTempFile("sonar-upload", ".wav").apply { writeBytes(Wav.synthetic()) }
+            try {
+                val api = HttpSonarApi(server.url("/").toString(), "test-token", ServerClock { 0 }, true, encodeAudio = { it.readBytes() })
+                val uploaded = CompletableDeferred<Unit>()
+                val result = async {
+                    api.exchangeUpload("s", file, json("transcript" to "你好")) { uploaded.complete(Unit) }
+                }
+                withTimeout(5000) { uploaded.await() }
+                assertFalse(result.isCompleted)
+                assertEquals("private_chat", result.await().text("action"))
+                assertEquals(1, server.requestCount)
+            } finally { file.delete() }
+        }
     }
 
 }

@@ -81,7 +81,7 @@ class ExchangeRulesTest {
         val audio = File.createTempFile("exchange-test", ".wav")
         try {
             val clock = ServerClock { 0 }
-            val api = HttpSonarApi(server.url("/").toString(), "test-device-token", clock, true)
+            val api = HttpSonarApi(server.url("/").toString(), "test-device-token", clock, true, encodeAudio = { it.readBytes() })
             server.enqueue(MockResponse().setBody("""{"session":{"id":"s","revision":1,"auto_publish":true},"server_time":"2026-10-25T00:00:00Z"}"""))
             val start = json("client_request_id" to "11111111-1111-4111-8111-111111111111", "expected_revision" to 1,
                 "place_id" to "road", "auto_publish" to true, "auto_play" to true, "network_enabled" to true)

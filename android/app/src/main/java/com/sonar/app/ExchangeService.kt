@@ -108,8 +108,9 @@ class ExchangeService : Service() {
     private val pendingTaskNotices = linkedMapOf<String, String>()
     private val notifiedTasks = mutableSetOf<String>()
     private var noticeSynthesis: suspend (String, File) -> Unit = { text, file -> AgentSpeech(this).synthesize(text, file); Unit }
+    @Volatile private var captureTurn: CapturingTurn? = null
     private val segments = Channel<Captured>(1)
-    private data class Captured(val pcm: ByteArray, val cut: Boolean, val blocked: Boolean, val epoch: Int, val time: String, val echo: String?)
+    private data class Captured(val pcm: ByteArray, val cut: Boolean, val blocked: Boolean, val epoch: Int, val time: String, val echo: String?, val turn: CapturingTurn)
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -195,12 +196,13 @@ class ExchangeService : Service() {
                 profile = Profile.parse(api.remotePlace(profile.revision, config.remotePlaceId).getJSONObject("profile"))
             }
             val request = json("client_request_id" to UUID.randomUUID().toString(),
-                "interaction_mode" to "voice_first",
+                "interaction_mode" to "voice_first", "client_managed_voice" to true,
                 "expected_revision" to profile.revision,
                 "place_id" to intent.getStringExtra("place_id").orEmpty(),
                 "timezone" to ZoneId.systemDefault().id)
             if (closing) return
             rememberSession(api.startExchange(request).getJSONObject("session"))
+            check(session!!.optBoolean("client_managed_voice")) { "请连接最新版声呐服务" }
             startResolved.complete(session)
             if (closing) return
             check(session!!.text("interaction_mode") == "voice_first") { "请连接新版声呐服务" }
@@ -279,23 +281,35 @@ class ExchangeService : Service() {
         }
         launch {
             for (clip in segments) {
-                if (clip.epoch != epoch || closing) { localPending.decrementAndGet(); continue }
-                val file = File(cacheDir, "exchange-${UUID.randomUUID()}.wav")
+                if (clip.epoch != epoch || closing) { clip.turn.cancel(); localPending.decrementAndGet(); continue }
+                val file = File(cacheDir, "exchange-${clip.turn.id}.wav")
                 android.util.Log.i("SonarVoice", "segment bytes=${clip.pcm.size} cut=${clip.cut} blocked=${clip.blocked}")
                 if (!localQuiet && !closing) update("recognizing", "已收音，正在识别这句话")
                 file.writeBytes(Wav.header(clip.pcm.size) + clip.pcm)
                 // Local controls must not wait for either cloud recognition or a pending upload.
-                val local = runCatching { commands.recognize(file) }.getOrNull()
-                localPending.decrementAndGet()
+                val local = try {
+                    clip.turn.local.await()
+                } catch (e: CancellationException) {
+                    clip.turn.cancel(); file.delete()
+                    if (!isActive) throw e
+                    continue
+                } catch (_: Exception) {
+                    clip.turn.cancel()
+                    retain(file); file.delete()
+                    update("private", "本地控制识别暂不可用，这句话保持私有")
+                    failureVoice(R.raw.voice_retry)
+                    continue
+                } finally { localPending.decrementAndGet() }
                 // Readiness came from loading the bundled model, not recognizing arbitrary speech.
                 val localCommand = local?.let(::localExchangeCommand)
                 if (localCommand != null) {
-                    file.delete()
+                    clip.turn.cancel(); file.delete()
                     if (!looksLikePlaybackEcho(local, clip.echo, minLength = 2)) handleCommand(localCommand)
                     continue
                 }
-                if (clip.epoch != epoch || localQuiet || closing || !audioAvailable()) { file.delete(); continue }
+                if (clip.epoch != epoch || localQuiet || closing || !audioAvailable()) { clip.turn.cancel(); file.delete(); continue }
                 if (clip.cut || clip.blocked || submitJob?.isActive == true) {
+                    clip.turn.cancel()
                     retain(file); file.delete()
                     if (clip.cut) failureVoice(R.raw.voice_too_long)
                     else if (clip.blocked) failureVoice(R.raw.voice_retry)
@@ -304,41 +318,91 @@ class ExchangeService : Service() {
                 }
                 submitJob = launch {
                     var uploadStarted = false
+                    var submissionCompleted = false
+                    val turnStarted = SystemClock.elapsedRealtime()
                     try {
                         ExchangeRuntime.mutable.update { it.copy(publishing = true) }
                         update("recognizing", "正在处理本次发言")
-                        val transcript = LinxSession(allowLocal = BuildConfig.DEBUG).transcribe(file, config)
-                        android.util.Log.i("SonarVoice", "stt_complete chars=${transcript.length}")
-                        val command = localExchangeCommand(transcript)
-                        if (looksLikePlaybackEcho(transcript, clip.echo, minLength = if (command == null) 4 else 2)) {
-                            retain(file); update("private", "这段可能含扬声器回声，保持私有"); return@launch
-                        }
-                        if (command != null) { handleCommand(command); return@launch }
-                        ExchangeRuntime.mutable.update { it.copy(lastPostId = null, lastKind = null, responseText = "", sources = emptyList(), visibility = "") }
-                        contextJob?.join()
-                        if (!heardContextReady) { retain(file); update("private", "原声上下文尚未同步，这段保持私有"); failureVoice(R.raw.voice_retry); return@launch }
                         val requestId = file.nameWithoutExtension.removePrefix("exchange-")
-                        val result = locationMutex.withLock {
-                            if (clip.epoch != epoch || localQuiet || closing || !audioAvailable()) throw CancellationException("会话已改变")
-                            val live = rememberSession(api.exchangeSession(session!!.getString("id")).getJSONObject("session"))
-                            val metadata = json("client_request_id" to requestId,
-                                "expected_session_revision" to live.getInt("revision"), "transcript" to transcript, "recorded_at" to clip.time)
-                            journal.beginTurn(requestId, live.getString("id"), metadata)
-                            lastRequestId = requestId
-                            update("sending", "识别完成，正在发送到声呐服务器")
-                            uploadStarted = true; uploadInFlight = true
-                            api.exchangeUpload(live.getString("id"), file, metadata).also { response ->
-                                response.optJSONObject("session")?.let(::rememberSession)
-                                val action = response.optJSONObject("voice_action")
-                                if (action?.text("type") == "location") {
-                                    val store = ConfigStore(this@ExchangeService)
-                                    store.save(store.load().copy(remotePlaceId = if (action.optBoolean("use_real_location")) "" else action.getString("place_id")))
-                                    config = store.load()
-                                    response.optJSONObject("profile")?.optJSONObject("presence")?.let(::applyProfile)
-                                }
-                            }
+                        var routedResult: JSONObject? = null
+                        var referenceStarted = false
+                        var playbackPosition: () -> Int = { 0 }
+                        val reply = audio.stream(
+                            mayStart = { canPlay(clip.epoch) },
+                            onStarted = {
+                                playing = true
+                                android.util.Log.i("SonarVoice", "first_playback turn=$requestId at_ms=${SystemClock.elapsedRealtime()} elapsed_ms=${SystemClock.elapsedRealtime() - turnStarted}")
+                                update("agent_response", "声呐正在回应")
+                            },
+                            onReference = { frame ->
+                                if (!referenceStarted) { echoGuard.beginStream(playbackPosition); referenceStarted = true }
+                                echoGuard.appendStream(frame)
+                            },
+                            onPlaybackClock = { playbackPosition = it },
+                        ) { sink ->
+                            val hooks = LinxTurnHooks(
+                                pcm = sink,
+                                spoken = { text ->
+                                    if (routedResult?.text("action") == "private_chat") {
+                                        lastPlaybackText = text
+                                        ExchangeRuntime.mutable.update { it.copy(responseText = text, speaker = "agent", sources = emptyList(), visibility = "private") }
+                                    }
+                                },
+                                route = route@{ transcript ->
+                                    android.util.Log.i("SonarVoice", "stt_complete chars=${transcript.length} elapsed_ms=${SystemClock.elapsedRealtime() - turnStarted}")
+                                    val command = localExchangeCommand(transcript)
+                                    if (looksLikePlaybackEcho(transcript, clip.echo, minLength = if (command == null) 4 else 2)) {
+                                        retain(file); update("private", "这段可能含扬声器回声，保持私有"); return@route false
+                                    }
+                                    if (command != null) { handleCommand(command); return@route false }
+                                    ExchangeRuntime.mutable.update { it.copy(lastPostId = null, lastKind = null, responseText = "", sources = emptyList(), visibility = "") }
+                                    contextJob?.join()
+                                    if (!heardContextReady) { retain(file); update("private", "原声上下文尚未同步，这段保持私有"); failureVoice(R.raw.voice_retry); return@route false }
+                                    val live = locationMutex.withLock {
+                                        if (clip.epoch != epoch || localQuiet || closing || !audioAvailable()) throw CancellationException("会话已改变")
+                                        rememberSession(api.exchangeSession(session!!.getString("id")).getJSONObject("session"))
+                                    }
+                                    val result = run {
+                                        val metadata = json("client_request_id" to requestId,
+                                            "expected_session_revision" to live.getInt("revision"), "transcript" to transcript, "recorded_at" to clip.time,
+                                            "captured_context_post_id" to clip.turn.contextPostId)
+                                        OpusFiles.forUpload(file) // Fail encoding before recording an uncertain network submission.
+                                        journal.beginTurn(requestId, live.getString("id"), metadata)
+                                        lastRequestId = requestId
+                                        update("sending", "识别完成，正在发送到声呐服务器")
+                                        uploadStarted = true; uploadInFlight = true
+                                        val uploadAt = SystemClock.elapsedRealtime()
+                                        api.exchangeUpload(live.getString("id"), file, metadata) {
+                                            android.util.Log.i("SonarVoice", "upload_body_complete elapsed_ms=${SystemClock.elapsedRealtime() - uploadAt}")
+                                            scope.launch {
+                                                if (!submissionCompleted && clip.epoch == epoch && !localQuiet && !closing)
+                                                    update("processing", "录音已发出，等待声呐处理")
+                                            }
+                                        }.also { response ->
+                                            submissionCompleted = true
+                                            uploadInFlight = false
+                                            android.util.Log.i("SonarVoice", "server_complete elapsed_ms=${SystemClock.elapsedRealtime() - uploadAt}")
+                                            response.optJSONObject("session")?.let(::rememberSession)
+                                            val action = response.optJSONObject("voice_action")
+                                            if (action?.text("type") == "location") {
+                                                val store = ConfigStore(this@ExchangeService)
+                                                store.save(store.load().copy(remotePlaceId = if (action.optBoolean("use_real_location")) "" else action.getString("place_id")))
+                                                config = store.load()
+                                                response.optJSONObject("profile")?.optJSONObject("presence")?.let(::applyProfile)
+                                            }
+                                        }
+                                    }
+                                    journal.recordTurnResult(requestId, result)
+                                    routedResult = result
+                                    if (result.text("action") == "private_chat") {
+                                        update("assistant_wait", "正在接收私人助手回复")
+                                        true
+                                    } else false
+                                })
+                            clip.turn.bind(hooks)
+                            checkNotNull(clip.turn.reply) { "本轮未启动云识别，录音保持私有" }.await()
                         }
-                        journal.recordTurnResult(requestId, result)
+                        val result = routedResult ?: return@launch
                         android.util.Log.i("SonarVoice", "server_result status=${result.text("status")} action=${result.text("action")}")
                         if (clip.epoch != epoch || localQuiet || closing) return@launch
                         recognitionFailures = 0
@@ -347,11 +411,8 @@ class ExchangeService : Service() {
                         if (result.optJSONObject("voice_action") != null) {
                             handleVoiceAction(result.getJSONObject("voice_action"), result.optJSONObject("agent_response"), clip.epoch)
                         } else if (result.text("action") == "private_chat") {
-                            val reply = LinxSession(allowLocal = BuildConfig.DEBUG).exchange(file, config)
-                            if (clip.epoch == epoch && !localQuiet && !closing) {
-                                val pcm = reply.audio ?: error("私人助手没有返回语音")
-                                playAgent(reply.assistantText, clip.epoch, Wav.header(pcm.bytes.size, pcm.rate) + pcm.bytes)
-                            }
+                            ExchangeRuntime.mutable.update { it.copy(responseText = reply.assistantText, speaker = "agent", visibility = "private") }
+                            update("ready", "正在听")
                         } else if (result.optJSONObject("agent_response") != null) {
                             val response = result.getJSONObject("agent_response")
                             val text = response.text("text")
@@ -373,15 +434,24 @@ class ExchangeService : Service() {
                             else update("ready", "正在听")
                         }
                     } catch (e: CancellationException) {
-                        if (uploadStarted) {
+                        if (uploadStarted && !submissionCompleted) {
                             retain(file)
                             update("unknown", "交流已暂停；刚才的发送结果待核对，不会自动补发")
                         }
                         throw e
                     }
                     catch (e: Exception) {
-                        android.util.Log.w("SonarVoice", "turn_failed uploaded=$uploadStarted type=${e.javaClass.simpleName}")
+                        val apiError = (e as? ApiFailure)?.let {
+                            val code = it.code.take(80).replace(Regex("[^A-Z0-9_]"), "_")
+                            " http=${it.status} code=$code"
+                        }.orEmpty()
+                        android.util.Log.w("SonarVoice", "turn_failed uploaded=$uploadStarted type=${e.javaClass.simpleName}$apiError")
                         retain(file)
+                        if (submissionCompleted) {
+                            update("assistant_unavailable", "发言已处理，但后续语音回应未完成")
+                            failureVoice(R.raw.voice_failure, stopAfter = e is LinxAuthFailure)
+                            return@launch
+                        }
                         update(if (uploadStarted) "unknown" else "private",
                             if (uploadStarted) "发送结果待核对，不会自动补发" else "这句话没有发送")
                         recognitionFailures++
@@ -389,8 +459,13 @@ class ExchangeService : Service() {
                             stopAfter = e is LinxAuthFailure || recognitionFailures >= 2)
                         if (uploadStarted) scope.launch { reconcilePending() }
                     } finally {
+                        android.util.Log.i("SonarVoice", "turn_complete elapsed_ms=${SystemClock.elapsedRealtime() - turnStarted} submitted=$submissionCompleted")
                         uploadInFlight = false
-                        ExchangeRuntime.mutable.update { it.copy(publishing = false) }
+                        if (playing) lastAudioEnd = SystemClock.elapsedRealtime()
+                        echoGuard.stop(); playing = false
+                        ExchangeRuntime.mutable.update { it.copy(publishing = false, playing = false) }
+                        clip.turn.cancel()
+                        OpusFiles.forgetUpload(file)
                         file.delete()
                     }
                 }
@@ -451,7 +526,11 @@ class ExchangeService : Service() {
             }
         }
         capture!!.run(onStart = {
-            sourceBlocked = playing && capture?.echoProtected != true
+            sourceBlocked = playing && capture?.echoProtected != true || submitJob?.isActive == true && !playing
+            captureTurn?.cancel()
+            captureTurn = CapturingTurn(scope, commands, config, cloud = !sourceBlocked && !localQuiet && !closing,
+                contextPostId = session?.text("context_post_id")?.takeUnless { it.isBlank() || it == "null" })
+            android.util.Log.i("SonarVoice", "capture_start turn=${captureTurn?.id} at_ms=${SystemClock.elapsedRealtime()}")
             segmentEcho = if (playing) lastPlaybackText else null
             segmentEpoch = epoch
             segmentTime = runCatching { clock.now().toString() }.getOrDefault("")
@@ -465,9 +544,14 @@ class ExchangeService : Service() {
                 }
             }
         }, onSegment = segment@{ pcm, cut ->
-            val captured = Captured(pcm, cut, sourceBlocked, segmentEpoch, segmentTime, segmentEcho)
+            val turn = captureTurn ?: return@segment
+            android.util.Log.i("SonarVoice", "capture_end turn=${turn.id} at_ms=${SystemClock.elapsedRealtime()} last_voice_ms=${capture?.lastVoiceFrameAt} pcm_bytes=${pcm.size}")
+            captureTurn = null
+            turn.finish()
+            val captured = Captured(pcm, cut, sourceBlocked, segmentEpoch, segmentTime, segmentEcho, turn)
             localPending.incrementAndGet()
             if (!segments.trySend(captured).isSuccess) {
+                turn.cancel()
                 localPending.decrementAndGet()
                 if (localQuiet || closing || captured.epoch != epoch) return@segment
                 val private = File(cacheDir, "exchange-${UUID.randomUUID()}.wav")
@@ -476,7 +560,8 @@ class ExchangeService : Service() {
             }
         }, allowed = ::audioAvailable, onReady = {
             scope.launch { update(if (localQuiet) "quiet" else "ready", if (localQuiet) "已保留安静状态" else "正在听") }
-        }, isSpeakerEcho = echoGuard::isEcho, onSilence = {
+        }, isSpeakerEcho = echoGuard::isEcho, onFrame = { frame -> captureTurn?.accept(frame) }, onSilence = {
+            captureTurn?.cancel(); captureTurn = null
             scope.launch {
                 if (!closing && !localQuiet && ExchangeRuntime.state.value.phase == "capturing" &&
                     localPending.get() == 0 && submitJob?.isActive != true) update("ready", "正在听")
@@ -496,21 +581,29 @@ class ExchangeService : Service() {
                 val live = rememberSession(api.exchangeSession(sid).getJSONObject("session"))
                 if (epoch != expectedEpoch || localQuiet || localPending.get() > 0 || !audioAvailable() || capture?.speaking == true || submitJob?.isActive == true || live.text("state") != "active" ||
                     !clock.valid(before) || before.key != d.key || before.revision != d.revision) return@launch
+                val intro = publicationIntro(before.payload, clock.now())
+                if (intro.isNotBlank()) playTextNow(intro, expectedEpoch)
+                val afterIntro = Delivery.parse(api.delivery(d.id).getJSONObject("delivery"))
+                if (!canPlay(expectedEpoch) || submitJob?.isActive == true || !clock.valid(afterIntro) ||
+                    afterIntro.key != before.key || afterIntro.revision != before.revision) return@launch
                 journal.markAttempt(before.key)
                 file = File(cacheDir, "exchange-play-${UUID.randomUUID()}.wav").apply { writeBytes(playbackBytes) }
                 currentDelivery = before
                 lastPlaybackText = before.payload.text("transcript")
-                ExchangeRuntime.mutable.update { it.copy(speaker = "human", responseText = before.payload.text("transcript"),
+                val synthetic = before.payload.optBoolean("synthetic")
+                ExchangeRuntime.mutable.update { it.copy(speaker = if (synthetic) "agent" else "human", responseText = before.payload.text("transcript"),
                     sources = listOf(before.payload), visibility = if (before.payload.text("kind") == "chat") "participants" else before.payload.text("visibility", "public")) }
                 audio.play(file!!, ownSpeaker = true,
                     mayStart = { epoch == expectedEpoch && !localQuiet && !closing && localPending.get() == 0 &&
-                        capture?.speaking != true && audioAvailable() },
+                        capture?.speaking != true && audioAvailable() && clock.valid(afterIntro) },
                     onStarted = {
                         playing = true
                         echoGuard.begin(playbackBytes)
-                        heardContextReady = false
-                        update("playing", "正在听相关原声")
-                        syncPlaybackContext(sid, before.payload.getString("post_id"), before.payload.optBoolean("synthetic"), expectedEpoch)
+                        update("playing", if (synthetic) "正在听合成声音" else "正在听相关原声")
+                        if (before.payload.text("kind") !in setOf("announcement", "knowledge")) {
+                            heardContextReady = false
+                            syncPlaybackContext(sid, before.payload.getString("post_id"), synthetic, expectedEpoch)
+                        }
                     })
                 journal.queueAck(before, if (before.type == "invitation") "prompted" else "played")
             } catch (e: CancellationException) {
@@ -661,6 +754,13 @@ class ExchangeService : Service() {
         check(state.text("publication") == "published" && state.text("applicability") !in setOf("expired", "not_started")) { "原声已失效" }
         val until = message.getJSONObject("time").text("valid_until")
         if (!canPlay(expectedEpoch) || until.isNotBlank() && clock.remaining(until) <= 0) return
+        val publication = JSONObject(item.toString()).put("published_at", message.getJSONObject("time").text("published_at"))
+        val intro = publicationIntro(publication, clock.now())
+        if (intro.isNotBlank()) playTextNow(intro, expectedEpoch)
+        val afterIntro = api.message(postId).getJSONObject("message").getJSONObject("state")
+        if (!canPlay(expectedEpoch) || afterIntro.text("publication") != "published" ||
+            afterIntro.text("applicability") in setOf("expired", "not_started") ||
+            until.isNotBlank() && clock.remaining(until) <= 0) return
         val file = File(cacheDir, "voice-selected-${UUID.randomUUID()}.wav").apply { writeBytes(playbackBytes) }
         val synthetic = item.optBoolean("synthetic") || message.getJSONObject("body").text("content_origin") == "agent_synthesized"
         try {
@@ -669,8 +769,10 @@ class ExchangeService : Service() {
                 responseText = item.text("transcript"), sources = listOf(item)) }
             audio.play(file, ownSpeaker = true, mayStart = { canPlay(expectedEpoch) && (until.isBlank() || clock.remaining(until) > 0) }, onStarted = {
                 playing = true; echoGuard.begin(playbackBytes); update("playing", if (synthetic) "正在听合成测试声音" else "正在听原声")
-                heardContextReady = false
-                syncPlaybackContext(session!!.getString("id"), postId, synthetic, expectedEpoch)
+                if (item.text("kind") !in setOf("announcement", "knowledge")) {
+                    heardContextReady = false
+                    syncPlaybackContext(session!!.getString("id"), postId, synthetic, expectedEpoch)
+                }
             })
         } finally {
             echoGuard.stop(); playing = false; file.delete()
@@ -721,9 +823,13 @@ class ExchangeService : Service() {
     private fun failureVoice(resource: Int, stopAfter: Boolean = false) {
         val failureEpoch = epoch
         val previous = playerJob
+        val submitting = submitJob
         previous?.cancel()
         playerJob = scope.launch {
             previous?.join()
+            // A second captured segment may need feedback while the first turn is
+            // awaiting its reply. Do not occupy the audio gate ahead of that reply.
+            if (!stopAfter) submitting?.join()
             if (stopAfter) {
                 capture?.stop()
                 localQuiet = true
@@ -736,7 +842,8 @@ class ExchangeService : Service() {
                 if (closing || failureEpoch != epoch || localQuiet && !stopAfter) return@launch
                 resources.openRawResource(resource).use { input -> file.outputStream().use { input.copyTo(it) } }
                 audio.play(file, AudioMode.PROMPT, ownSpeaker = true,
-                    mayStart = { !closing && failureEpoch == epoch && (stopAfter || !localQuiet) },
+                    mayStart = { !closing && failureEpoch == epoch &&
+                        (stopAfter || !localQuiet && submitJob?.isActive != true && capture?.speaking != true) },
                     onStarted = {
                         playing = true
                         echoGuard.begin(file.readBytes())
@@ -747,6 +854,7 @@ class ExchangeService : Service() {
             catch (e: Exception) { android.util.Log.w("SonarVoice", "feedback_playback_failed type=${e.javaClass.simpleName}") }
             finally {
                 echoGuard.stop(); playing = false; file.delete()
+                ExchangeRuntime.mutable.update { it.copy(playing = false) }
                 if (stopAfter) end()
             }
         }
@@ -858,6 +966,7 @@ class ExchangeService : Service() {
     }
 
     private fun quiet() {
+        captureTurn?.cancel(); captureTurn = null
         if (closing) return
         requestedQuiet = true
         localQuiet = true; epoch++
@@ -897,6 +1006,7 @@ class ExchangeService : Service() {
     }
 
     private fun end() {
+        captureTurn?.cancel(); captureTurn = null
         if (closing) return
         closing = true; epoch++
         controlJob?.cancel(); contextJob?.cancel()
@@ -920,6 +1030,8 @@ class ExchangeService : Service() {
     }
 
     override fun onDestroy() {
+        captureTurn?.cancel(); captureTurn = null
+        while (true) { val queued = segments.tryReceive().getOrNull() ?: break; queued.turn.cancel() }
         capture?.stop(); audio.close(); scope.cancel(); segments.close()
         ExchangeRuntime.mutable.update { it.copy(owned = false, publishing = false, playing = false,
             phase = if (it.phase == "unavailable") it.phase else "off") }

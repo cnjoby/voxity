@@ -14,6 +14,7 @@ import org.json.JSONObject
 import org.vosk.LibVosk
 import org.vosk.Model
 import org.vosk.Recognizer
+import kotlinx.coroutines.channels.ReceiveChannel
 
 /** Bundled, offline Chinese control recognition. It consumes the existing PCM, never another mic. */
 class LocalSpeechCommands(private val context: Context) {
@@ -30,6 +31,31 @@ class LocalSpeechCommands(private val context: Context) {
     }
 
     fun available() = model != null
+
+    suspend fun recognizeFrames(frames: ReceiveChannel<ByteArray>): String? = withContext(Dispatchers.Default) {
+        val ready = model ?: return@withContext null
+        Recognizer(ready, 16000f).use { recognizer ->
+            recognizer.setWords(true)
+            var count = 0
+            val texts = mutableListOf<String>()
+            var confident = true
+            fun collect(raw: String) {
+                val result = JSONObject(raw)
+                val text = result.text("text")
+                if (text.isBlank()) return
+                val words = result.objects("result")
+                if (words.isEmpty() || words.any { it.optDouble("conf", 0.0) < 0.75 }) confident = false
+                texts.add(text)
+            }
+            for (frame in frames) {
+                count += frame.size
+                if (count <= 6 * 32000 && recognizer.acceptWaveForm(frame, frame.size)) collect(recognizer.result)
+            }
+            if (count > 6 * 32000) return@withContext null
+            collect(recognizer.finalResult)
+            texts.joinToString(" ").takeIf { confident && localExchangeCommand(it) != null }
+        }
+    }
 
     suspend fun recognize(file: File): String? = withContext(Dispatchers.Default) {
         // Long content is sent to Linx. Local recognition has only a control role.

@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     invitation_cooldown_seconds: int = Field(default=30, ge=1, le=3600)
     presence_ttl: int = Field(default=600, ge=1)
     audio_ttl: int = Field(default=86400, ge=1)
+    # Published questions, observations and replies expire at Shanghai midnight.
+    # Disabled retains duration-based deployments; production explicitly enables it.
+    information_valid_until_day_end: bool = False
     amap_key: str = ""
     location_ttl: int = Field(default=60, ge=1)
     location_accuracy_m: float = Field(default=100, gt=0)
@@ -38,6 +41,9 @@ class Settings(BaseSettings):
     exchange_decision_timeout: float = Field(default=20, ge=0.05, le=30)
     exchange_listen_confidence: float = Field(default=0.65, ge=0.5, le=1)
     exchange_observation_ttl: int = Field(default=300, ge=10, le=3600)
+    # Explicit operator attestation: these Linx agents have no mutating cloud tools.
+    # Sonar's MCP gate alone cannot disable third-party platform tools.
+    managed_voice_verified_agents: set[str] = Field(default_factory=set)
 
     voice_radius_m: float = Field(default=150, gt=0)
     visit_exit_grace: int = Field(default=120, ge=1)

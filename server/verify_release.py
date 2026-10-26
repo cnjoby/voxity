@@ -46,7 +46,8 @@ class VoiceRoutes:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--synthetic", required=True, action="store_true")
-    parser.parse_args()
+    parser.add_argument("--opus-fixture", type=Path)
+    args = parser.parse_args()
     stream = io.BytesIO()
     with wave.open(stream, "wb") as writer:
         writer.setnchannels(1)
@@ -64,6 +65,7 @@ def main():
             decision_enabled=False,
             bamboo_api_key="",
             amap_key="",
+            managed_voice_verified_agents=set(),
         )
         app = create_app(settings)
         service = app.state.service
@@ -118,7 +120,9 @@ def main():
                     },
                 )["session"]
 
-            def utter(user, active, text, request_id=None):
+            def utter(user, active, text, request_id=None, audio=None):
+                content = original if audio is None else audio
+                compressed = content.startswith(b"OggS")
                 return call(
                     "POST",
                     f"/v1/exchange/sessions/{active['id']}/utterances",
@@ -133,7 +137,13 @@ def main():
                             }
                         )
                     },
-                    files={"audio": ("synthetic-silence.wav", original, "audio/wav")},
+                    files={
+                        "audio": (
+                            "synthetic.opus" if compressed else "synthetic-silence.wav",
+                            content,
+                            "audio/ogg" if compressed else "audio/wav",
+                        )
+                    },
                 )
 
             notice = call(
@@ -214,6 +224,55 @@ def main():
                 },
             )
             assert closed["status"] == "resolved"
+            if args.opus_fixture:
+                encoded = args.opus_fixture.read_bytes()
+                opus_session = session(
+                    "alice", request_humans=True, reply_thread=True, auto_play=True
+                )
+                opus_turn = utter("alice", opus_session, "帮我问问七牛还有车位吗？", audio=encoded)
+                assert opus_turn["status"] == "published" and opus_turn["action"] == "question"
+                opus_audio = client.get(
+                    f"/v1/audio/{opus_turn['post_id']}",
+                    headers={"Authorization": "Bearer " + "a" * 40},
+                )
+                assert opus_audio.status_code == 200 and opus_audio.content == encoded
+                assert opus_audio.headers["content-type"] == "audio/ogg"
+                call("POST", f"/v1/questions/{opus_turn['post_id']}/cancel", json={})
+                compressed = call(
+                    "POST",
+                    "/v1/posts/drafts",
+                    files={"audio": ("synthetic.opus", encoded, "audio/ogg")},
+                    data={
+                        "metadata": json.dumps(
+                            {
+                                "client_request_id": str(uuid.uuid4()),
+                                "kind": "question",
+                                "transcript": "合成Opus发布验证",
+                                "target_place_id": PLACE["id"],
+                            }
+                        )
+                    },
+                )["post_id"]
+                call("POST", f"/v1/posts/{compressed}/confirm", json={})
+                audio = client.get(
+                    f"/v1/audio/{compressed}", headers={"Authorization": "Bearer " + "a" * 40}
+                )
+                assert audio.status_code == 200 and audio.content == encoded
+                assert audio.headers["content-type"] == "audio/ogg"
+                assert not call("GET", "/v1/me")["media"]["client_managed_voice"]
+                refused = client.post(
+                    "/v1/agent/sessions",
+                    headers={"Authorization": "Bearer " + "a" * 40},
+                    json={
+                        "client_request_id": str(uuid.uuid4()),
+                        "expected_revision": call("GET", "/v1/me")["profile"]["revision"],
+                        "client_managed_voice": True,
+                    },
+                )
+                assert (
+                    refused.status_code == 503
+                    and refused.json()["error"]["code"] == "VOICE_PLATFORM_NOT_VERIFIED"
+                )
             with service.scope() as db:
                 assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
                 assert not db.execute("PRAGMA foreign_key_check").fetchall()
@@ -232,7 +291,16 @@ def main():
                         "played_not_resolved",
                         "explicit_resolution",
                         "integrity",
-                    ],
+                    ]
+                    + (
+                        [
+                            "opus_utterance_storage_download",
+                            "opus_upload_storage_download",
+                            "unverified_voice_gate",
+                        ]
+                        if args.opus_fixture
+                        else []
+                    ),
                 }
             )
         )

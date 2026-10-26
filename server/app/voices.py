@@ -121,9 +121,9 @@ class VoiceRules:
             meta, _ = self.voice_meta(db, q["id"])
             return min(
                 epoch((meta or {}).get("valid_until")) or 0,
-                q["published_at"] + self.settings.audio_ttl,
+                self.information_expiry(q["published_at"], self.settings.audio_ttl),
             )
-        return q["published_at"] + self.settings.audio_ttl
+        return self.information_expiry(q["published_at"], self.settings.audio_ttl)
 
     def thread_open(self, db, q):
         return (
@@ -211,6 +211,8 @@ class VoiceRules:
                 if kind == "announcement"
                 else self.settings.observation_max_ttl
             )
+            if start is not None and self.settings.information_valid_until_day_end:
+                maximum = max(maximum, self.information_expiry(start, maximum) - start)
             if start is None or end is None or end <= start or end - start > maximum:
                 raise Problem(422, "VALIDITY_REQUIRED", "即时内容必须设置有界的生效与失效时间")
         if end is not None and (end <= self.clock() or (start is not None and end <= start)):
@@ -295,6 +297,18 @@ class VoiceRules:
     def confirm_voice(self, db, user, p):
         meta, _ = self.voice_meta(db, p["id"])
         self.validate_voice(db, user, meta)
+        if (
+            self.settings.information_valid_until_day_end
+            and (p["kind"] == "announcement" or meta.get("purpose") == "observation")
+            and meta.get("validity_policy") != "until_withdrawn"
+        ):
+            from .service import stamp
+
+            meta["valid_until"] = stamp(self.information_expiry(self.clock(), 0))
+            db.execute(
+                "UPDATE voice_details SET metadata_json=? WHERE post_id=?",
+                (json.dumps(meta, ensure_ascii=False), p["id"]),
+            )
         db.execute(
             "UPDATE posts SET status='published',published_at=?,expires_at=? WHERE id=?",
             (self.clock(), epoch(meta.get("valid_until")), p["id"]),
@@ -490,7 +504,20 @@ class VoiceRules:
                 (user, p["id"]),
             ).fetchone()
             previous = json.loads(old["voice_json"] or "{}") if old else {}
-            if old and (previous.get("visit_id") == visit["visit_id"] or p["kind"] == "scene"):
+            # A transient scope loss must not consume an unplayed arrival notice.
+            # Explicit skips/failures and completed playback still deduplicate.
+            recover_scope = (
+                old
+                and p["kind"] == "announcement"
+                and old["state"] == "cancelled"
+                and old["reason_code"] == "OUTSIDE_SCOPE"
+                and old["played_at"] is None
+            )
+            if (
+                old
+                and not recover_scope
+                and (previous.get("visit_id") == visit["visit_id"] or p["kind"] == "scene")
+            ):
                 continue
             if p["kind"] == "scene" and (
                 visit["scene_count"] >= self.settings.scene_prompt_limit
@@ -589,13 +616,17 @@ class VoiceRules:
             }
         )
         if p["kind"] == "answer":
-            payload["valid_until"] = stamp(p["published_at"] + self.settings.audio_ttl)
+            payload["valid_until"] = stamp(
+                self.information_expiry(p["published_at"], self.settings.audio_ttl)
+            )
         elif p["kind"] == "reply":
             payload["valid_until"] = stamp(
                 self.thread_deadline(db, self.post(db, meta["root_question_id"]))
             )
         elif p["kind"] == "question" and p["question_status"] == "answered":
-            payload["valid_until"] = stamp(p["published_at"] + self.settings.audio_ttl)
+            payload["valid_until"] = stamp(
+                self.information_expiry(p["published_at"], self.settings.audio_ttl)
+            )
         if meta:
             payload.update(
                 {
@@ -702,11 +733,12 @@ class VoiceRules:
             root = self.thread_root(db, user, qid)
             if not self.thread_open(db, root) or (
                 p["kind"] == "answer"
-                and p["published_at"] + self.settings.audio_ttl <= self.clock()
+                and self.information_expiry(p["published_at"], self.settings.audio_ttl)
+                <= self.clock()
             ):
                 raise Problem(410, "CONVERSATION_CLOSED", "对话已结束")
             expiry = (
-                p["published_at"] + self.settings.audio_ttl
+                self.information_expiry(p["published_at"], self.settings.audio_ttl)
                 if p["kind"] == "answer"
                 else self.thread_deadline(db, root)
             )

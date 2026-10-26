@@ -19,6 +19,8 @@ class ExchangeCapture {
         private set
     @Volatile var speaking = false
         private set
+    @Volatile var lastVoiceFrameAt = 0L
+        private set
 
     fun stop() {
         running = false
@@ -26,7 +28,7 @@ class ExchangeCapture {
     }
 
     @SuppressLint("MissingPermission")
-    suspend fun run(onStart: () -> Unit, onSegment: (ByteArray, Boolean) -> Unit, allowed: () -> Boolean = { true }, onReady: () -> Unit = {}, isSpeakerEcho: (ByteArray) -> Boolean = { false }, onSilence: () -> Unit = {}) = withContext(Dispatchers.IO) {
+    suspend fun run(onStart: () -> Unit, onSegment: (ByteArray, Boolean) -> Unit, allowed: () -> Boolean = { true }, onReady: () -> Unit = {}, isSpeakerEcho: (ByteArray) -> Boolean = { false }, onSilence: () -> Unit = {}, onFrame: (ByteArray) -> Unit = {}) = withContext(Dispatchers.IO) {
         val min = AudioRecord.getMinBufferSize(16000, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
         check(min > 0) { "本机不支持自然交流录音" }
         val mic = AudioRecord.Builder()
@@ -42,7 +44,8 @@ class ExchangeCapture {
             if (AcousticEchoCanceler.isAvailable()) echo = AcousticEchoCanceler.create(mic.audioSessionId)?.apply { enabled = true }
             if (NoiseSuppressor.isAvailable()) noise = NoiseSuppressor.create(mic.audioSessionId)?.apply { enabled = true }
             echoProtected = echo?.enabled == true
-            val vad = SpeechSegments(onStart = { speaking = true; onStart() }, onSegment = { bytes, cut ->
+            val vad = SpeechSegments(onStart = { speaking = true; onStart() }, onFrame = onFrame,
+                onVoiced = { lastVoiceFrameAt = SystemClock.elapsedRealtime() }, onSegment = { bytes, cut ->
                 speaking = false
                 onSegment(bytes, cut)
             })

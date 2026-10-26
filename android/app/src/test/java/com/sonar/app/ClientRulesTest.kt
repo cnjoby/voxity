@@ -93,6 +93,7 @@ class ClientRulesTest {
                     "private-device-token",
                     ServerClock { 0 },
                     true,
+                    encodeAudio = { it.readBytes() },
                 )
             val file = File.createTempFile("sonar", ".wav").apply { writeBytes(Wav.synthetic()) }
             try {
@@ -104,7 +105,7 @@ class ClientRulesTest {
                     assertEquals("/v1/posts/drafts", request.path)
                     val body = request.body.readUtf8()
                     assertTrue(body.contains("same-request-id"))
-                    assertTrue(body.contains("name=\"audio\"; filename=\"voice.wav\""))
+                    assertTrue(body.contains("name=\"audio\"; filename=\"voice.opus\""))
                     assertFalse(body.contains("private-device-token"))
                 }
             } finally {

@@ -4,12 +4,13 @@ import asyncio
 import json
 import math
 import re
-import wave
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 import httpx
 
+from .audio import duration
+from .contracts import session_capabilities
 from .errors import Problem
 from .models import LocationUpdate, RemotePlaceUpdate
 
@@ -32,7 +33,12 @@ PILOT_PLACES = {
         121.600516,
         ("金科路", "高科中路", "金科路高科中路路口", "金科路与高科中路路口"),
     ),
-    "B0K2KHYN77": ("模力社区", 31.184698, 121.617324, ("模力", "魔力")),
+    "B0K2KHYN77": (
+        "模力社区",
+        31.184698,
+        121.617324,
+        ("模力", "魔力", "摩利社区", "摩力社区"),
+    ),
 }
 PARK_PLACES = {
     "B0FFJEOSPR": ("张江人工智能岛", 31.185578, 121.609707, ("张江人工智能岛", "人工智能岛")),
@@ -44,7 +50,7 @@ def explicit_ask(text):
         return False
     return bool(
         re.search(
-            r"^(?:声呐[，,\s]*)?(?:(?:请|帮我|替我|麻烦)[，,\s]*)?(?:问问|问一下|问一声|打听一下|打听|找人问|找个人问|向.{0,15}(?:人|车友).{0,6}(?:问|咨询))",
+            r"^(?:声呐[，,\s]*)?(?:(?:请|帮我|替我|麻烦)[，,\s]*)?(?:问问|问一下|问一问|问一声|打听一下|打听|找人问|找个人问|向.{0,15}(?:人|车友).{0,6}(?:问|咨询))",
             text,
         )
     )
@@ -78,9 +84,11 @@ def location_target(text):
 
 
 def explicit_reply(text):
+    if public_negation(text) or meta_request(text):
+        return False
     return bool(
         re.match(
-            r"^(?:声呐[，,\s]*)?(?:帮我|替我|请)?(?:回复|回|问|告诉)(?:他|刚才那位|刚才那个人)",
+            r"^(?:声呐[，,\s]*)?(?:你[，,\s]*)?(?:(?:请|麻烦)[，,\s]*)?(?:帮我|替我)?(?:回复|回|问|告诉)(?:他|她|刚才那位|刚才那个人)",
             text,
         )
     )
@@ -282,6 +290,7 @@ class VoiceFirstRules:
             sid,
             {
                 "timezone": data.timezone,
+                "client_managed_voice": data.client_managed_voice,
                 "continuous_share": False,
                 "private_default": True,
                 "heard_post_id": None,
@@ -338,7 +347,14 @@ class VoiceFirstRules:
         ).fetchone()
 
     async def plan_voice_turn(self, user, session, data, audio, pending, state):
-        from .agent import affirmative, agent_response, clean, intent, weather_followup
+        from .agent import (
+            affirmative,
+            agent_response,
+            clean,
+            intent,
+            private_lookup_request,
+            weather_followup,
+        )
 
         text = clean(data.transcript)
         if meta_request(text):
@@ -401,8 +417,19 @@ class VoiceFirstRules:
         )
         if known_kind == "private_chat":
             return {"action": "private_chat", "leave_chat": True}
+        if explicit_reply(text) and not heard:
+            return {
+                "action": "respond",
+                "response": agent_response(
+                    "clarification", "你想回复哪条原声？请先重听要回复的消息。"
+                ),
+            }
         if (
-            (known_kind == "weather" or follow_weather)
+            (
+                known_kind == "weather"
+                or follow_weather
+                or (known_kind == "human_question" and private_lookup_request(text))
+            )
             and not explicit_ask(text)
             and not explicit_reply(text)
         ):
@@ -507,16 +534,35 @@ class VoiceFirstRules:
                 audio,
                 pending,
                 intent_override=override,
-                public_intent=route == "ask",
+                public_intent=route == "ask"
+                or (
+                    kind == "human_question"
+                    and bool(re.search(r"车位|停车|停得下", text))
+                    and session_capabilities(session).request_humans
+                    and not private_lookup_request(text)
+                ),
             )
             if plan:
                 if plan.get("action") == "question":
                     async with self.async_scope() as db:
                         old = db.execute(
-                            "SELECT * FROM personal_tasks WHERE user_id=? AND status='waiting' AND question_id IS NOT NULL ORDER BY created_at DESC LIMIT 1",
-                            (user,),
+                            "SELECT t.* FROM personal_tasks t JOIN posts p ON p.id=t.question_id "
+                            "WHERE t.user_id=? "
+                            "AND p.status='published' AND p.question_status='waiting' "
+                            "AND p.expires_at>? LIMIT 1",
+                            (user, self.clock()),
                         ).fetchone()
                     if old and not plan.get("replace_task"):
+                        if (
+                            old["place_id"] == plan["place"]["id"]
+                            or old["session_id"] != session["id"]
+                            or old["question_id"] != session["context_post_id"]
+                            or old["status"] != "waiting"
+                            or old["expires_at"] <= self.clock()
+                        ):
+                            # One active question per owner: refresh the request without
+                            # asking the owner to replace the same destination or old chat.
+                            return {**plan, "replace_task": old["id"]}
                         return {
                             "action": "clarify",
                             "plan": {
@@ -577,8 +623,7 @@ class VoiceFirstRules:
                 "kind": post["kind"],
             }
         )
-        with wave.open(str(self.store.audio_dir / f"{post['id']}.wav"), "rb") as wav:
-            payload["duration_seconds"] = wav.getnframes() / wav.getframerate()
+        payload["duration_seconds"] = duration(self.store.audio_path(post["id"]))
         return payload
 
     def finish_voice_control(self, db, user, session, turn, data, plan):

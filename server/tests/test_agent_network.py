@@ -159,10 +159,6 @@ def test_ambiguous_scenic_area_never_uses_session_place_and_continuation_survive
     restarted.state.service.geo = Maps(now)
     with TestClient(restarted) as client:
         result = utter(client, a, now, transcript="上海世纪公园").json()
-        assert (
-            result["status"] == "clarifying" and result["agent_response"]["kind"] == "human_offer"
-        )
-        result = utter(client, a, now, transcript="好").json()
         assert result["status"] == "published", result
         assert result["target_place"]["id"] == PARK["id"]
         assert client.get("/v1/audio/" + result["post_id"], headers=auth()).content == wav()
@@ -189,10 +185,7 @@ def test_duplicate_poi_names_require_selection_and_expired_clarification_cannot_
     first = utter(c, a, now, transcript="世纪公园还有停车位吗？").json()
     assert first["status"] == "clarifying"
     selected = utter(c, a, now, transcript="第二个").json()
-    assert (
-        selected["status"] == "clarifying" and selected["agent_response"]["kind"] == "human_offer"
-    )
-    selected = utter(c, a, now, transcript="好").json()
+    assert selected["status"] == "published", selected
     assert selected["target_place"]["id"] == "another-park"
     c.post("/v1/questions/" + selected["post_id"] + "/cancel", headers=auth(), json={})
     first = utter(c, a, now, transcript="前面景区还有车位吗？").json()

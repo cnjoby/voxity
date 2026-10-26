@@ -6,7 +6,11 @@
 
 ## 当前源码与交付
 
-2026-10-26 核对：Android **0.2.3（versionCode 9）**；服务端包含会话优先与天气路由修复，既有发布标识为 `20261026-conversation-first-025`。本次 GitHub 上传验证与历史部署/设备验收分别记录，不据此宣称重新部署。
+2026-10-27 当前 Android **0.3.6/code17**、生产 **20261027-modaily-alias-040**：修复已删除问题阻断启动、车位询问转发及“摩利社区”地点识别；用户已确认ESP32与Android一轮双向自动出声。固件子模块改为公开仓库的 `main`，固定至 `60e1a1e`，未烧录新版。[本轮证据与验收边界](docs/development/esp32-reply-failure-20261027.md#040之后的真实往返)。以下为历史交付记录。
+
+2026-10-26 当前 Android **0.3.4/code15**、生产 **20261026-day-validity-036**：修复公告返回范围后未恢复及手机跨到访误排除，普通动态信息北京时间当日24:00截止，原声前简报“几分钟前/几小时前发布”。[变更与分层验证](docs/development/day-validity-20261026.md)。下方为前版交付记录。
+
+2026-10-26 当前 Android **0.3.1（versionCode 12）**，修复 0.3.0 的语音启动门禁配置、真机 Opus 尾部和重试提示音播放冲突，已覆盖安装用户手机；见[语音故障修复记录](docs/development/voice-start-fix-20261026.md)。当前生产服务端为 `20261026-remote-route-032`，支持从本人选定的有效远程地点查询路线并明确起点来源，手机无需更新；见[路线起点修复与验证](docs/development/remote-route-fix-20261026.md)。GitHub 上传与部署状态分别记录。
 
 | 交付内容 | 入口 |
 | --- | --- |
@@ -17,7 +21,7 @@
 | 最新现有 PPT、讲述备注、内嵌/独立原理动画 | [路演材料](docs/presentations/README.md) |
 | 本次上传范围与验证证据 | [2026-10-26 交付记录](docs/delivery/github-20261026.md) |
 
-本仓库包含现有 Android、服务端、测试、脚本和部署配置。ESP32 固件由同事独立维护，通过 `firmware/esp32` Git 子模块引用原私有仓库的 Sonar 分支，获取源码需要原仓库权限；[下载与更新方式](firmware/README.md)，对接使用[当前固件接入规范](docs/development/esp32-ai-handoff.md)。灵矽、高德和 Bamboo 为外部服务，实际 Key、设备绑定及运行数据不随源码分发。
+本仓库包含现有 Android、服务端、测试、脚本和部署配置。ESP32 固件由同事独立维护，通过 `firmware/esp32` Git 子模块引用公开仓库已合并Sonar的 `main` 分支固定提交，HTTPS获取无需额外私有权限；[下载与更新方式](firmware/README.md)，对接使用[当前固件接入规范](docs/development/esp32-ai-handoff.md)。灵矽、高德和 Bamboo 为外部服务，实际 Key、设备绑定及运行数据不随源码分发。
 
 ## 快速启动服务端
 

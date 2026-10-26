@@ -84,10 +84,14 @@ def test_park_relation_does_not_include_modaily_or_bypass_quiet_or_freshness(env
 @pytest.mark.parametrize("yes", ["好，你帮我问一下。", "好啊，你帮我问一问。", "请帮我问问吧"])
 def test_natural_confirmation_uses_original_place_and_original_audio(env, yes):
     c, s, n, alice = setup_voice(env)
-    first = utter(c, alice, n, transcript="模力社区现在还能停车吗？").json()
+    from test_agent_network import Maps
+
+    s.geo = Maps(n)
+    s.geo.fail = True
+    first = utter(c, alice, n, transcript="模力社区天气怎样？").json()
     assert first["agent_response"]["kind"] == "human_offer"
     result = utter(c, alice, n, transcript=yes).json()
     assert result["status"] == "published", result
     assert result["target_place"]["id"] == MODAILY
     with s.scope() as db:
-        assert s.post(db, result["post_id"])["transcript"] == "模力社区现在还能停车吗？"
+        assert s.post(db, result["post_id"])["transcript"] == "模力社区天气怎样？"

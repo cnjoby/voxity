@@ -1,8 +1,12 @@
 # 声呐 Sonar｜ESP32 当前开发交接书
 
+2026-10-26 当前生产036：问题、邀请、现场动态、回答与回复按北京时间发布当日24:00截止，以 `expires_at` / `valid_until` 为准，不写死120秒或90秒；长期须知保持有效。原声 payload 新增 `playback_intro`，播放前应独立播报该提示再播原录音；自行格式化时用服务端时间与 `published_at` 的差计算“几分钟前/几小时前”，不能用下载时间或录制时间替代。提示后复核交付、静音及有效期，播完原声才报 played。Android0.3.4已接入，ESP32固件本次未更新。[完整说明](day-validity-20261026.md)。
+
+2026-10-26音频格式核对：历史WAV仍返回WAV，新上传Ogg Opus返回Ogg Opus；[当前合同与隔离curl证据](opus-interface-20261026.md)。
+
 2026-10-26补充：生产为`20261026-conversation-first-025`，Android仍为0.2.3。有效question邀请不再等待相关性模型批准：以`actionable`、真实request_id和有效期为准，`payload.attention.action=notify`；新增`model_action`／`model_reason`仅为标记、`blocking=false`，不要因模型ignore、defer或尚未返回而自行拦截。有效会话收听新问题不再受十分钟冷却。核心question／answer路径和WAV编码保持不变；连续真人闲聊仍需第7节的双方会话接入。[完整变更与验证](conversation-first-20261026.md)。
 
-更新：2026-10-25，针对真实 Android 0.2.3 与当前生产服务核对。当前入口：`http://122.195.131.106`（联调HTTP）或 `https://122.195.131.106`。这是当前指南；旧v4文字已移至[历史快照](esp32-ai-handoff-v4-20261025-archive.md)，不得再按旧模拟ID、8秒限制和旧会话描述实现。ESP32工程、板卡资料及烧录环境由硬件同学维护；2026-10-26 已通过 `firmware/esp32` 子模块固定引用原私有仓库的 Sonar 分支，获取与构建方法见[固件入口](../../firmware/README.md)。本次只纳入源码引用，未重新验证固件或烧录设备。
+更新：2026-10-25，针对真实 Android 0.2.3 与当前生产服务核对。当前入口：`http://122.195.131.106`（联调HTTP）或 `https://122.195.131.106`。这是当前指南；旧v4文字已移至[历史快照](esp32-ai-handoff-v4-20261025-archive.md)，不得再按旧模拟ID、8秒限制和旧会话描述实现。ESP32工程、板卡资料及烧录环境由硬件同学维护；2026-10-27 子模块已更新为公开仓库 `main` 的正式合并提交60e1a1e，获取与构建方法见[固件入口](../../firmware/README.md)。该源码已通过完整构建与主机门禁，未烧录；设备当前版本的一轮双向出声按用户反馈单独记录。
 
 ## 先修复当前“answered, waiting voice”
 
@@ -51,7 +55,7 @@
 | GET | /v1/inbox | 本人可处理的邀请／音频队列 |
 | GET | /v1/inbox/{delivery_id} | 动作前复核这次交付 |
 | POST | /v1/inbox/{delivery_id}/ack | 同一request_id的真实结果回执 |
-| GET | /v1/audio/{post_id} | 实际WAV二进制 |
+| GET | /v1/audio/{post_id} | 根据实际Content-Type解码Ogg Opus或WAV二进制 |
 | POST | /v1/voices/{post_id}/queue | 本人明确重听时重新排队，使用稳定client_request_id |
 | GET | /v1/requests/{request_id} | 核对未知提交结果，不能换UUID重发 |
 
@@ -111,7 +115,7 @@ invitation短提示完成可用alerted，明确拒绝用declined；audio完整�
 
 ## 3. 录音、发布与回听
 
-当前原声格式仍为PCM WAV：16kHz、16-bit signed little-endian、单声道；**上限已从旧8秒提高到30秒**（480000帧），单文件上限1000KiB，完整multipart body上限1MiB。时长与格式都校验；超限不截半句发布。当前4.16秒回答小于旧8秒限制，此次不能仅归因于时长上限调整。
+2026-10-26最新版原声业务传输支持标准Ogg Opus（`audio/ogg`，单声道、目标24kbps），压缩原声原样存储和下载，不自动转换给旧客户端。固件须按响应Content-Type解码Opus，不能按WAV头或裸PCM直接送I2S。仍接受16kHz、16-bit signed little-endian、单声道PCM WAV素材。两类均校验有效时长不超过30秒，单文件1000KiB、完整multipart body1MiB；详见[格式与流式取消合同](low-latency-opus-20261026.md)。本轮未修改子模块固件或烧录设备，发布配套固件须独立验收。
 
 解析RIFF chunks找fmt/data，校验PCM、声道、采样率、位宽和data长度。不要把44字节WAV头当PCM送I2S；I2S槽宽32-bit、麦克风有效位、左右声道与播放器16-bit PCM的转换由真实板卡资料确定。不得猜引脚或仅凭成功写入队列就声称喇叭播放完成。
 

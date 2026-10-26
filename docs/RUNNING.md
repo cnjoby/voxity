@@ -1,6 +1,6 @@
 # 声呐 Sonar｜运行与验证指南
 
-核对日期：2026-10-26。适用范围：本仓库 Android 0.2.3（versionCode 9）与当前服务端源码。ESP32 固件由同事独立维护，通过 `firmware/esp32` 子模块固定引用；需要原私有仓库权限及独立 ESP-IDF 环境，见[固件运行入口](../firmware/README.md)。
+核对日期：2026-10-27。[旧内容清理后的启动恢复](development/android-stale-question-20261027.md)已安装验证。公告恢复、当日有效与发布时间提示见[当前规则](development/day-validity-20261026.md)。适用范围：本仓库 Android 0.3.6（versionCode 17，Android 10+，已覆盖安装用户手机）与当前服务端源码。[语音故障修复记录](development/voice-start-fix-20261026.md)包含手机平台配置、核验放行、真机 Opus 尾部和播放冲突修复及验收结果。[低延迟与Opus变更](development/low-latency-opus-20261026.md)要求终端处理Ogg Opus下载，配套两端应同步发布，不提供旧客户端转换分支。ESP32 固件由同事独立维护，通过 `firmware/esp32` 子模块固定引用；现为公开仓库，仍需独立 ESP-IDF 环境，见[固件运行入口](../firmware/README.md)。
 
 ## 1. 下载与环境
 
@@ -9,7 +9,7 @@ git clone https://github.com/cnjoby/voxity.git
 cd voxity
 ```
 
-上述普通克隆足够运行 Android 与服务端。有固件仓库权限时，再执行 `git submodule update --init --recursive firmware/esp32` 下载固定版本的硬件源码；新下载完整项目也可使用 `git clone --recurse-submodules`。Download ZIP 不包含子模块源码。
+上述普通克隆足够运行 Android 与服务端。需要固件时，再执行 `git submodule update --init --recursive firmware/esp32` 下载固定版本的硬件源码；新下载完整项目也可使用 `git clone --recurse-submodules`。Download ZIP 不包含子模块源码。
 
 | 部分 | 需要准备 | 依赖入口 |
 | --- | --- | --- |

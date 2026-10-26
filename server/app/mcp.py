@@ -21,6 +21,18 @@ class ProtectedMCP:
         self.service = service
         self.apps = {}
 
+    def require_mutation_owner(self, db, uid):
+        session = db.execute(
+            "SELECT * FROM exchange_sessions WHERE user_id=? AND expires_at>? ORDER BY rowid DESC LIMIT 1",
+            (uid, self.service.clock()),
+        ).fetchone()
+        if session and (self.service.voice_policy(db, session) or {}).get("client_managed_voice"):
+            raise Problem(
+                409,
+                "CLIENT_MANAGED_VOICE",
+                "本次语音的业务动作由终端提交，请勿重复执行；此调用未执行",
+            )
+
     def user_app(self, uid, streamable=False):
         if not streamable and uid in self.apps:
             return self.apps[uid]
@@ -35,11 +47,13 @@ class ProtectedMCP:
             transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
         )
 
-        def invoke(method, **kwargs):
+        def invoke(method, *, mutation=False, **kwargs):
             try:
                 if uid is None:
                     raise Problem(401, "MCP_IDENTITY_MISSING", "缺少平台身份，仅可发现工具")
                 with self.service.scope() as db:
+                    if mutation:
+                        self.require_mutation_owner(db, uid)
                     result = method(db, uid, **kwargs)
                 return CallToolResult(
                     content=[TextContent(type="text", text=json.dumps(result, ensure_ascii=False))],
@@ -89,6 +103,7 @@ class ProtectedMCP:
             """更新本人的收听意愿。安静须设置 mode=quiet；此工具不发布声音。"""
             return invoke(
                 self.service.set_focus,
+                mutation=True,
                 expected_revision=expected_revision,
                 mode=mode,
                 assist_enabled=assist_enabled,
@@ -100,6 +115,7 @@ class ProtectedMCP:
             """从本轮候选请求播放一条真人原声。"""
             return invoke(
                 self.service.queue_voice,
+                mutation=True,
                 request_id=request_id,
                 profile_revision=profile_revision,
                 post_id=post_id,
@@ -144,6 +160,7 @@ class ProtectedMCP:
             """主人明确结束或确认已解决时更新本人任务；保留动作UUID用于幂等重试。"""
             return invoke(
                 self.service.change_personal_task,
+                mutation=True,
                 task_id=task_id,
                 expected_revision=expected_revision,
                 client_request_id=client_request_id,
@@ -193,7 +210,7 @@ class ProtectedMCP:
 
         @mcp.tool()
         async def get_driving_route(place_id: str):
-            """从本人当前有效定位查询到明确目的地的驾车时间及分段路况；不代表现场目击或精确到达承诺。"""
+            """从本人有效定位或选定的远程地点查询到明确目的地的驾车时间及路况；远程起点会明确标记，不代表手机实到。"""
             return await information("route", place_id)
 
         @mcp.tool()
@@ -218,7 +235,7 @@ class ProtectedMCP:
                         "recorded_at": recorded_at,
                     }
                 )
-                result = await self.service.submit_agent_turn(uid, session_id, data)
+                result = await self.service.submit_agent_turn(uid, session_id, data, from_mcp=True)
                 return CallToolResult(
                     content=[TextContent(type="text", text=json.dumps(result, ensure_ascii=False))],
                     structuredContent=result,

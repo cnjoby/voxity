@@ -23,7 +23,7 @@ class VoiceFeedbackTest {
         val result = json("status" to "published", "action" to "question", "target_place" to json("label" to "七牛"),
             "match_scope" to json("kind" to "park", "label" to "张江人工智能岛"), "dispatch" to json("device_received" to 0))
         val receipt = submissionReceipt(result)
-        assertTrue(receipt.contains("提交到七牛") && receipt.contains("园区范围"))
+        assertTrue(receipt.contains("正在将问题转发给七牛在场的人") && receipt.contains("园区范围"))
         assertTrue(receipt.contains("尚未有现场设备确认接收"))
         assertFalse(receipt.contains("已有现场设备确认收到"))
         result.getJSONObject("dispatch").put("device_received", 1)

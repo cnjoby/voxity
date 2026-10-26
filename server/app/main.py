@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import TypeAdapter, ValidationError
 
 from .attention_worker import AttentionWorker
-from .audio import MAX_AUDIO
+from .audio import MAX_AUDIO, is_opus
 from .config import Settings
 from .contracts import AgentTurnResult, SessionCapabilities, VoiceMessageView
 from .errors import Problem
@@ -34,6 +34,19 @@ from .models import (
 from .service import Service
 
 voice_log = logging.getLogger("sonar.voice")
+AUDIO_UPLOAD_DESCRIPTION = (
+    "完整单声道Ogg Opus（audio/ogg）或16kHz/16-bit PCM WAV（audio/wav），"
+    "最长30秒，单文件最多1000KiB；按实际音频内容校验。"
+)
+AUDIO_RESPONSES = {
+    200: {
+        "description": "按存储格式原样返回音频：历史WAV仍为WAV，新上传的Ogg Opus返回Ogg Opus。",
+        "content": {
+            media: {"schema": {"type": "string", "format": "binary"}}
+            for media in ("audio/wav", "audio/ogg")
+        },
+    }
+}
 
 
 def audio_agent(scope):
@@ -115,6 +128,7 @@ def create_app(settings: Settings | None = None, clock=time.time):
     # Upstream request URLs can contain provider credentials in query parameters.
     logging.getLogger("httpx").setLevel(logging.WARNING)
     voice_log.setLevel(logging.INFO)
+    logging.getLogger("sonar.latency").setLevel(logging.INFO)
     settings = settings or Settings()
     service = Service(settings, clock)
 
@@ -134,7 +148,7 @@ def create_app(settings: Settings | None = None, clock=time.time):
                 with suppress(asyncio.CancelledError):
                     await task
 
-    app = FastAPI(title="Sonar", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Sonar", version="0.3.0", lifespan=lifespan)
     app.state.service = service
     app.add_middleware(UploadLimit)
     app.add_middleware(AudioTrace)
@@ -171,7 +185,13 @@ def create_app(settings: Settings | None = None, clock=time.time):
 
     @app.get("/v1/me")
     def me(db=DB, uid=USER):
-        return service.me(db, uid)
+        return {
+            **service.me(db, uid),
+            "media": {
+                "upload_formats": ["wav", "ogg_opus"],
+                "client_managed_voice": service.managed_voice_available(db, uid),
+            },
+        }
 
     @app.get("/v1/contracts")
     def contracts(uid=USER):
@@ -266,7 +286,7 @@ def create_app(settings: Settings | None = None, clock=time.time):
     @app.post("/v1/exchange/sessions/{sid}/utterances")
     async def exchange_utterance(
         sid: str,
-        audio: Annotated[UploadFile, File()],
+        audio: Annotated[UploadFile, File(description=AUDIO_UPLOAD_DESCRIPTION)],
         metadata: Annotated[str, Form(max_length=4096)],
         uid=LOCATION_USER,
     ):
@@ -306,7 +326,7 @@ def create_app(settings: Settings | None = None, clock=time.time):
 
     @app.post("/v1/posts/drafts")
     async def draft(
-        audio: Annotated[UploadFile, File()],
+        audio: Annotated[UploadFile, File(description=AUDIO_UPLOAD_DESCRIPTION)],
         metadata: Annotated[str, Form(max_length=4096)],
         db=DB,
         uid=USER,
@@ -374,18 +394,23 @@ def create_app(settings: Settings | None = None, clock=time.time):
     def conversation(qid: str, db=DB, uid=USER):
         return service.conversation(db, uid, qid)
 
-    @app.get("/v1/audio/{pid}")
+    @app.get("/v1/audio/{pid}", response_class=FileResponse, responses=AUDIO_RESPONSES)
     def audio(pid: str, db=DB, uid=USER):
         p = service.post(db, pid)
         if not service.can_read_audio(db, uid, p):
             raise Problem(404, "NOT_FOUND", "音频不存在")
+        path = service.store.audio_path(p["id"])
+        compressed = path.suffix == ".opus"
         return FileResponse(
-            service.store.audio_dir / f"{p['id']}.wav", media_type="audio/wav", filename="voice.wav"
+            path,
+            media_type="audio/ogg" if compressed else "audio/wav",
+            filename="voice.opus" if compressed else "voice.wav",
         )
 
-    @app.get("/v1/chat/audio/{mid}")
+    @app.get("/v1/chat/audio/{mid}", response_class=Response, responses=AUDIO_RESPONSES)
     def chat_audio(mid: str, db=DB, uid=USER):
-        return Response(service.chat_audio(db, uid, mid), media_type="audio/wav")
+        data = service.chat_audio(db, uid, mid)
+        return Response(data, media_type="audio/ogg" if is_opus(data) else "audio/wav")
 
     from .mcp import ProtectedMCP
 

@@ -64,10 +64,29 @@ interface LinxCodec {
     suspend fun encode(pcm16k: ByteArray, params: LinxAudioParams): List<ByteArray>
 
     suspend fun decode(packets: List<ByteArray>, params: LinxAudioParams): PcmAudio
+
+    fun openDecoder(params: LinxAudioParams): LinxPcmDecoder {
+        require(params.format == "pcm") { "此解码器不支持Opus流" }
+        return object : LinxPcmDecoder {
+            override fun push(packet: ByteArray): List<PcmAudio> {
+                require(packet.isNotEmpty() && packet.size % 2 == 0)
+                return listOf(PcmAudio(packet, params.rate))
+            }
+            override fun finish() = emptyList<PcmAudio>()
+            override fun close() {}
+        }
+    }
+}
+
+interface LinxPcmDecoder : AutoCloseable {
+    fun push(packet: ByteArray): List<PcmAudio>
+    fun finish(): List<PcmAudio>
 }
 
 /** Platform Opus codecs; old phones without an encoder fail explicitly before listen/start. */
 class AndroidLinxCodec : LinxCodec {
+    override fun openDecoder(params: LinxAudioParams): LinxPcmDecoder =
+        if (params.format == "pcm") super.openDecoder(params) else StreamingOpusDecoder(params)
     override suspend fun encode(pcm16k: ByteArray, params: LinxAudioParams): List<ByteArray> =
         withContext(Dispatchers.IO) {
             val pcm = resample(pcm16k, 16000, params.rate)
@@ -87,7 +106,7 @@ class AndroidLinxCodec : LinxCodec {
                     }
                 val format =
                     MediaFormat.createAudioFormat("audio/opus", params.rate, 1).apply {
-                        setInteger(MediaFormat.KEY_BIT_RATE, 32000)
+                        setInteger(MediaFormat.KEY_BIT_RATE, OpusFiles.BIT_RATE)
                         setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, maxOf(4096, frameBytes))
                     }
                 val packets = transcode(chunks, format, true) { _, _ -> }.first

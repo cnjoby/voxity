@@ -39,6 +39,9 @@ fun ExchangeActivePanel(state: ExchangeState, vm: SonarViewModel) {
                 state.phase == "capturing" -> "正在收音"
                 state.phase == "recognizing" -> "正在识别"
                 state.phase == "sending" -> "正在发送"
+                state.phase == "processing" -> "声呐正在处理"
+                state.phase == "assistant_wait" -> "正在准备回复"
+                state.phase == "assistant_unavailable" -> "语音回复失败"
                 state.phase == "shared" -> "原声已发送"
                 state.phase == "private" -> "这句话没有发送"
                 state.phase == "playback_unavailable" -> "原声播放失败"
@@ -46,7 +49,7 @@ fun ExchangeActivePanel(state: ExchangeState, vm: SonarViewModel) {
                 else -> "正在听"
             }, fontSize = 30.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center,
                 modifier = Modifier.testTag("exchange-phase").semantics { liveRegion = LiveRegionMode.Polite })
-            if (state.phase in setOf("unavailable", "unknown", "private", "recognizing", "sending", "shared", "waiting", "playback_unavailable"))
+            if (state.phase in setOf("unavailable", "unknown", "private", "recognizing", "sending", "processing", "assistant_wait", "assistant_unavailable", "shared", "waiting", "playback_unavailable"))
                 Text(state.message, Modifier.padding(top = 12.dp).testTag("exchange-message"), textAlign = TextAlign.Center)
             if (state.remote)
                 Text("远程地点 · 非手机实到", Modifier.padding(top = 12.dp), fontSize = 14.sp)

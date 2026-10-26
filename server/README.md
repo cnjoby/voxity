@@ -1,5 +1,15 @@
 # Sonar 服务端
 
+当前生产 **20261027-modaily-alias-040**：普通车位问题按授权直接问人；明确私人查找不公开，真人原声来源附play_audio动作。修复实测ASR“摩利社区”触发错误地点澄清。284项服务端测试、Linux隔离验收及健康检查通过；切换时111条消息/音频和身份、配置保留。[本轮证据与设备验收](../docs/development/esp32-reply-failure-20261027.md#039040与android听感对照)。
+
+历史生产 **20261026-parking-context-038**：同地点重复提问及新会话不再被旧等待问题拦住，直接更新并发布本轮原声；当前会话改问另一个地点仍确认替换。[原因与部署](../docs/development/parking-direct-20261026.md#038旧等待问题触发重复确认)。
+
+2026-10-26 当前生产 **20261026-parking-direct-037**：已授权会话的车位询问在无有效信息时直接转发，不再确认是否问在场的人；地点澄清与已有信息查询保留。[部署与验收边界](../docs/development/parking-direct-20261026.md)。
+
+2026-10-26 当前生产 **20261026-day-validity-036**：普通动态信息、邀请与回答按北京时间发布当日24:00截止；显式长期入园公告保留。修复公告范围恢复，自动候选覆盖当日有效信息，payload新增`playback_intro`。[规则、迁移和验证](../docs/development/day-validity-20261026.md)。
+
+2026-10-26 新增[低延迟与Opus链路](../docs/development/low-latency-opus-20261026.md)：Ogg Opus上传校验、压缩原声存储/下载、终端托管语音的MCP写操作门禁与明确回复修复。新增PyAV锁定依赖，请执行`uv sync --frozen`；当前发布为`20261026-opus-contract-031`（[音频格式核对](../docs/development/opus-interface-20261026.md)），在030基础上补齐OpenAPI并验证Opus utterance，见[复审与发布验证](../docs/development/review-deploy-opus-20261026.md)。预生成语音需通过平台核验名单，默认不启用。压缩音频下载返回`audio/ogg`，终端需支持Opus。
+
 2026-10-26 当前源码、环境配置与可复制命令见[统一运行指南](../docs/RUNNING.md)；当前模块与职责见[模块规格](../docs/design/module-specs.md)。下文包含早期实现基线，旧固定目标地点、仅 confirm 发布和 MCP 工具清单不能代替当前契约。当前自然会话采用分项授权，MCP 兼容 Streamable HTTP 与旧 SSE。
 
 FastAPI + SQLite + 音频文件，单进程运行。已实现 S1–S3 的本地业务链路及 S4 的 MCP 适配；平台与设备验收状态见 [HANDOFF](HANDOFF.md)。[三端契约](../docs/development/contracts.md)约定字段与交互。

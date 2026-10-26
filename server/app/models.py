@@ -137,6 +137,7 @@ class ExchangeStart(StrictModel):
     expected_revision: int = Field(ge=1)
     place_id: str = Field(default="", max_length=100)
     interaction_mode: Literal["voice_first"] = "voice_first"
+    client_managed_voice: bool = Field(default=False, strict=True)
     timezone: str = Field(default="Asia/Shanghai", max_length=100)
     auto_publish: bool = Field(default=False, strict=True)
     auto_play: bool = Field(default=False, strict=True)
@@ -167,6 +168,7 @@ class ExchangeUtterance(StrictModel):
     expected_session_revision: int = Field(ge=1)
     transcript: Text
     recorded_at: AwareDatetime
+    captured_context_post_id: str | None = Field(default=None, max_length=100)
 
 
 class InformationQuery(StrictModel):

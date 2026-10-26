@@ -33,6 +33,10 @@ def clean(text):
     return text.strip("，,。！？?!、 \n")
 
 
+def private_lookup_request(text):
+    return bool(re.search(r"查|只问你|只想知道|不问人", text))
+
+
 def intent(text):
     text = clean(text)
     if re.search(r"别发|不要公开|不公开|不要发出去|只是聊天|只是私聊", text):
@@ -62,7 +66,7 @@ def intent(text):
         return None
     if re.search(r"车位|停车|停得下", text):
         return "human_question"
-    if re.search(r"问问|问一下|帮我问|现场的人|那边的人|那边的车友", text):
+    if re.search(r"问问|问一下|问一问|帮我问|现场的人|那边的人|那边的车友", text):
         return "human_question"
     if re.search(r"天气|下雨|气温|降雨", text):
         return "weather"
@@ -124,7 +128,7 @@ def destination_query(text, continuation=False):
     text = clean(text)
     text = re.sub(r"^(?:就是|是|我说的是|我指的是|目的地是)", "", text)
     text = re.sub(
-        r"^(?:请|帮我|麻烦)?(?:查一下|查查|看看|问问|问一下|查询|了解一下)[，,\s]*", "", text
+        r"^(?:请|帮我|麻烦)?(?:查一下|查查|看看|问问|问一下|问一问|查询|了解一下)[，,\s]*", "", text
     )
     match = re.search(r"(?:我(?:想|要|准备)?去|去|前往|到)([^，,。！？?!]{2,60})", text)
     query = match[1] if match else text
@@ -229,12 +233,11 @@ class AgentRules(ChatRules):
             kind == "human_question"
             and session_capabilities(session).private_query
             and not public_intent
-            and not re.search(r"问问|问一下|帮我问|现场的人|那边的人|那边的车友", text)
+            and not re.search(r"问问|问一下|问一问|帮我问|现场的人|那边的人|那边的车友", text)
         )
         async with self.async_scope() as db:
             chat = self.active_chat(db, user, session["id"])
             chat = dict(chat) if chat else None
-            private_default = (self.voice_policy(db, session) or {}).get("private_default", False)
             weather_context = (self.voice_policy(db, session) or {}).get("weather_context", {})
         follow_weather = (
             weather_followup(text)
@@ -459,9 +462,13 @@ class AgentRules(ChatRules):
                     "action": "respond",
                     "response": agent_response("no_information", "这个地点暂无适用的知识或解说。"),
                 }
-            if private_lookup and (
-                not session_capabilities(session).request_humans or private_default
-            ):
+            if private_lookup and private_lookup_request(original_query(pending, data)):
+                return {
+                    **plan,
+                    "action": "respond",
+                    "response": agent_response("no_information", "暂时没查到有效车位信息。"),
+                }
+            if private_lookup and not session_capabilities(session).request_humans:
                 return {
                     **plan,
                     "action": "clarify",
@@ -510,7 +517,8 @@ class AgentRules(ChatRules):
                     **plan,
                     "action": "respond",
                     "response": agent_response(
-                        "location_required", "需要你当前的有效定位，才能查询前往这个地点的路况。"
+                        "location_required",
+                        "请先取得有效定位，或选择一个远程出发地点，再查前往这个地点的路况。",
                     ),
                 }
             return {
@@ -562,17 +570,25 @@ class AgentRules(ChatRules):
             )
         async with self.async_scope() as db:
             p = self.profile_row(db, user)
+            remote_origin = self.is_remote_place(p)
             if (
-                p["source"] not in ("android", "android_mock")
+                (p["source"] not in ("android", "android_mock") and not remote_origin)
                 or p["source"] == "android_mock"
                 and not self.settings.allow_mock_location
+                or p["latitude"] is None
+                or p["longitude"] is None
                 or p["sampled_at"] is None
                 or not -10 <= self.clock() - p["sampled_at"] < self.settings.location_ttl
                 or p["accuracy_m"] is None
                 or p["accuracy_m"] > self.settings.location_accuracy_m
             ):
-                raise Problem(409, "LOCATION_REQUIRED", "需要当前有效定位")
+                raise Problem(409, "LOCATION_REQUIRED", "需要有效定位或远程出发地点")
             origin = (p["latitude"], p["longitude"])
+            origin_place = {
+                "origin_place_id": p["place_id"],
+                "origin_place_label": self.place_label(db, p["place_id"]),
+                "origin_source": p["source"],
+            }
         route = await asyncio.to_thread(self.geo.driving, origin, place)
         traffic = route["traffic_m"]
         slow = sum(traffic.get(k, 0) for k in ("缓行", "拥堵", "严重拥堵"))
@@ -587,10 +603,16 @@ class AgentRules(ChatRules):
         )
         return agent_response(
             "route",
-            f"高德当前规划，到{place['label']}约{round(route['distance_m'] / 1000, 1)}公里，预计{max(1, round(route['duration_seconds'] / 60))}分钟。{detail}",
+            (
+                f"从你选择的远程地点{origin_place['origin_place_label']}出发，"
+                if remote_origin
+                else ""
+            )
+            + f"高德当前规划，到{place['label']}约{round(route['distance_m'] / 1000, 1)}公里，预计{max(1, round(route['duration_seconds'] / 60))}分钟。{detail}",
             [
                 {
                     **route,
+                    **origin_place,
                     "place_id": place["id"],
                     "place_label": place["label"],
                     "valid_until": datetime.fromtimestamp(
@@ -685,6 +707,10 @@ class AgentRules(ChatRules):
                     self.change_personal_task(
                         db, user, task["id"], task["revision"], data.client_request_id, "cancel"
                     )
+                elif task["question_id"]:
+                    question = self.post(db, task["question_id"])
+                    if question["question_status"] == "waiting":
+                        self.cancel(db, user, question["id"])
             if self.clock() - original.recorded_at.timestamp() > self.settings.exchange_turn_ttl:
                 raise Problem(410, "TURN_EXPIRED", "原提问已过期，请重新提问")
             place = plan["place"]
@@ -707,7 +733,7 @@ class AgentRules(ChatRules):
                 self.confirm(db, user, draft["post_id"])
             except BaseException:
                 if created:
-                    (self.store.audio_dir / f"{draft['post_id']}.wav").unlink(missing_ok=True)
+                    self.store.audio_path(draft["post_id"]).unlink(missing_ok=True)
                 raise
             pid = draft["post_id"]
             db.execute(
@@ -783,6 +809,24 @@ class AgentRules(ChatRules):
             return {"status": "responded", "action": "private_chat"}
         else:
             result = {"status": "responded", "action": "agent", "agent_response": plan["response"]}
+            originals = [
+                source
+                for source in plan["response"].get("sources", [])
+                if source.get("content_origin") == "human_original"
+                and source.get("post_id") in plan.get("evidence_ids", [])
+            ]
+            if originals:
+                post = self.post(db, originals[0]["post_id"])
+                item = self.voice_audio_item(db, user, post)
+                result["voice_action"] = {
+                    "type": "play_audio",
+                    "items": [
+                        {
+                            key: item[key]
+                            for key in ("post_id", "audio_url", "kind", "duration_seconds")
+                        }
+                    ],
+                }
             if plan.get("place"):
                 self.register_agent_place(db, plan["place"])
                 result["target_place"] = {

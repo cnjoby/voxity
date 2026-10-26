@@ -405,8 +405,24 @@ class SonarViewModel(app: Application) : AndroidViewModel(app) {
         val qid = store.questionId ?: me.recent.firstOrNull()?.also { store.questionId = it }
         val previous = mutable.value.question
         if (qid != null && (previous?.id != qid || previous.status == "waiting")) {
-            val question = Question.parse(current.question(qid))
-            if (store.questionId == qid) mutable.update { it.copy(question = question) }
+            try {
+                val question = Question.parse(current.question(qid))
+                if (store.questionId == qid) mutable.update { it.copy(question = question) }
+            } catch (e: ApiFailure) {
+                if (e.status !in setOf(404, 410)) throw e
+                if (store.questionId == qid) {
+                    store.questionId = null
+                    mutable.update {
+                        it.copy(
+                            question = null, remainingSeconds = null, audioOutcome = null,
+                            conversationId = it.conversationId.takeUnless { id -> id == qid },
+                            conversation = if (it.conversationId == qid) emptyList() else it.conversation,
+                            canReply = it.canReply && it.conversationId != qid,
+                            message = "已连接，可以开始语音",
+                        )
+                    }
+                }
+            }
         }
         val q = mutable.value.question
         mutable.update {
@@ -808,7 +824,7 @@ class SonarViewModel(app: Application) : AndroidViewModel(app) {
     fun discardDraft() {
         if (mutable.value.busy || mutable.value.recording || mutable.value.transcribing) return
         stopPlayback()
-        store.draft?.let { File(it.file).delete() }
+        store.draft?.let { OpusFiles.forgetUpload(File(it.file)); File(it.file).delete() }
         store.draft = null
         mutable.update { it.copy(draft = null, message = "草稿已丢弃，可以重新录音") }
     }
@@ -838,6 +854,7 @@ class SonarViewModel(app: Application) : AndroidViewModel(app) {
             store.questionId = result.getString("question_id")
             mutable.update { it.copy(question = null) }
         }
+        OpusFiles.forgetUpload(File(draft.file))
         File(draft.file).delete()
         store.draft = null
         mutable.update {
@@ -962,8 +979,21 @@ class SonarViewModel(app: Application) : AndroidViewModel(app) {
                     ) {
                         "声音已失效，本次不播放"
                     }
+                    val intro = publicationIntro(latest.payload, clock.now())
+                    if (intro.isNotBlank()) {
+                        val introFile = File(getApplication<Application>().cacheDir, "publication-${UUID.randomUUID()}.wav")
+                        try {
+                            AgentSpeech(getApplication()).synthesize(intro, introFile)
+                            audio.play(introFile, AudioMode.PROMPT, ownSpeaker = true, mayStart = {
+                                foreground && generation == startedGeneration && !mutable.value.quiet && clock.valid(latest)
+                            })
+                        } finally { introFile.delete() }
+                    }
+                    val ready = Delivery.parse(captured.delivery(before.id).getJSONObject("delivery"))
+                    if (!foreground || generation != startedGeneration || mutable.value.quiet ||
+                        !clock.valid(ready) || ready.key != before.key || ready.revision != before.revision) return@launch
                     capturedStore.markAttempt(before.key)
-                    audio.play(file)
+                    audio.play(file, mayStart = { foreground && generation == startedGeneration && !mutable.value.quiet && clock.valid(ready) })
                     capturedStore.outcome(d.questionId, "played")
                     capturedStore.queueAck(before, "played")
                     mutable.update {

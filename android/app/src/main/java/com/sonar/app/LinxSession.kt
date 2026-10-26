@@ -4,9 +4,14 @@ import java.io.File
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import android.os.SystemClock
+import java.util.concurrent.atomic.AtomicInteger
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -30,18 +35,16 @@ data class LinxReply(
  * One socket per recorded clip. Public transcription and private assistant replies stay separate.
  */
 class LinxSession(
-    private val client: OkHttpClient =
-        OkHttpClient.Builder()
-            .followRedirects(false)
-            .followSslRedirects(false)
-            .connectTimeout(8, TimeUnit.SECONDS)
-            .readTimeout(0, TimeUnit.SECONDS)
-            .build(),
+    private val client: OkHttpClient = sharedClient,
     private val codec: LinxCodec = AndroidLinxCodec(),
     private val allowLocal: Boolean = false,
     private val handshakeMs: Long = 10000,
     private val responseMs: Long = 45000,
 ) {
+    companion object {
+        private val sharedClient = OkHttpClient.Builder().followRedirects(false).followSslRedirects(false)
+            .connectTimeout(8, TimeUnit.SECONDS).readTimeout(0, TimeUnit.SECONDS).build()
+    }
     private sealed interface Event {
         class Text(val value: String) : Event
 
@@ -52,11 +55,16 @@ class LinxSession(
         exchange(file, config, false).transcript
 
     suspend fun exchange(
-        file: File,
+        file: File?,
         config: DeviceConfig,
         conversation: Boolean = true,
         status: (String) -> Unit = {},
         recognized: (String) -> Unit = {},
+        route: (suspend (String) -> Boolean)? = null,
+        onPcm: (suspend (PcmAudio) -> Unit)? = null,
+        traceId: String = "",
+        spokenText: (String) -> Unit = {},
+        pcmFrames: ReceiveChannel<ByteArray>? = null,
     ): LinxReply {
         require(
             config.linxToken.isNotBlank() &&
@@ -81,31 +89,47 @@ class LinxSession(
         ) {
             "灵矽语音必须使用安全连接"
         }
-        val bytes = file.readBytes()
-        require(
-            bytes.size in 46..(1000 * 1024) &&
-                String(bytes, 0, 4) == "RIFF" &&
-                String(bytes, 8, 4) == "WAVE" &&
-                String(bytes, 36, 4) == "data"
-        ) {
-            "请重新录制语音"
+        val bytes = file?.readBytes() ?: byteArrayOf()
+        if (pcmFrames == null) {
+            require(
+                bytes.size in 46..(1000 * 1024) &&
+                    String(bytes, 0, 4) == "RIFF" &&
+                    String(bytes, 8, 4) == "WAVE" &&
+                    String(bytes, 36, 4) == "data"
+            ) {
+                "请重新录制语音"
+            }
+            val header = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+            require(
+                header.getShort(20).toInt() == 1 &&
+                    header.getShort(22).toInt() == 1 &&
+                    header.getInt(24) == 16000 &&
+                    header.getShort(34).toInt() == 16 &&
+                    header.getInt(40) == bytes.size - 44 &&
+                    (bytes.size - 44) % 2 == 0
+            ) {
+                "录音格式应为16kHz单声道PCM"
+            }
         }
-        val header = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
-        require(
-            header.getShort(20).toInt() == 1 &&
-                header.getShort(22).toInt() == 1 &&
-                header.getInt(24) == 16000 &&
-                header.getShort(34).toInt() == 16 &&
-                header.getInt(40) == bytes.size - 44 &&
-                (bytes.size - 44) % 2 == 0
-        ) {
-            "录音格式应为16kHz单声道PCM"
+        val startedAt = SystemClock.elapsedRealtime()
+        fun stage(name: String) {
+            android.util.Log.i("SonarVoice", "linx_stage=$name turn=$traceId at_ms=${SystemClock.elapsedRealtime()} elapsed_ms=${SystemClock.elapsedRealtime() - startedAt}")
         }
-        val events = Channel<Event>(128)
+        val events = Channel<Event>(4096)
+        val queuedBytes = AtomicInteger()
+        fun size(event: Event) = when (event) {
+            is Event.Audio -> event.value.size
+            is Event.Text -> event.value.length * 2
+        }
+        suspend fun receive(): Event {
+            val event = events.receive()
+            queuedBytes.addAndGet(-size(event))
+            return event
+        }
         val listener =
             object : WebSocketListener() {
                 private fun emit(ws: WebSocket, event: Event) {
-                    if (events.trySend(event).isFailure) {
+                    if (queuedBytes.addAndGet(size(event)) > 6 * 1024 * 1024 || events.trySend(event).isFailure) {
                         events.close(IOException("灵矽音频接收缓冲已满，请重试"))
                         ws.cancel()
                     }
@@ -120,7 +144,7 @@ class LinxSession(
                                 "version" to 1,
                                 "features" to json("mcp" to false),
                                 "transport" to "websocket",
-                                "audio_params" to LinxAudioParams().hello(),
+                                "audio_params" to LinxAudioParams("opus", 16000, 20).hello(),
                             )
                             .toString()
                     )
@@ -157,6 +181,7 @@ class LinxSession(
                 }
             }
         status("正在连接灵矽…")
+        stage("connect")
         val socket =
             client.newWebSocket(
                 Request.Builder()
@@ -169,6 +194,7 @@ class LinxSession(
                 listener,
             )
         var session = ""
+        var decoder: LinxPcmDecoder? = null
         fun send(j: JSONObject) {
             if (session.isNotBlank()) j.put("session_id", session)
             check(socket.send(j.toString())) { "灵矽语音连接已关闭" }
@@ -176,7 +202,7 @@ class LinxSession(
         try {
             val hello =
                 withTimeout(handshakeMs) {
-                    val event = events.receive()
+                    val event = receive()
                     require(event is Event.Text) { "灵矽未返回语音握手" }
                     val value = JSONObject(event.value)
                     check(value.text("type") == "hello" && value.text("transport") == "websocket") {
@@ -185,34 +211,75 @@ class LinxSession(
                     value
                 }
             session = hello.text("session_id")
+            stage("hello")
             val params = LinxAudioParams.parse(hello.optJSONObject("audio_params"))
-            val packets = codec.encode(bytes.copyOfRange(44, bytes.size), params)
-            require(packets.isNotEmpty()) { "录音中没有可发送的声音" }
             status("正在发送本次录音…")
             send(json("type" to "listen", "state" to "start", "mode" to "manual"))
-            packets.forEach { frame ->
+            var sentUs = 0L
+            val sendingAt = System.nanoTime()
+            suspend fun sendFrame(frame: ByteArray) {
                 check(socket.send(frame.toByteString())) { "灵矽录音上传中断" }
-                delay(
-                    if (params.format == "opus") OpusPackets.durationUs(frame) / 1000
-                    else frame.size * 1000L / (params.rate * 2)
-                )
+                sentUs += if (params.format == "opus") OpusPackets.durationUs(frame)
+                    else frame.size * 1_000_000L / (params.rate * 2)
+                // Pace by a single timeline: waiting for live capture already consumes time.
+                val remainingMs = (sendingAt + sentUs * 1000 - System.nanoTime()) / 1_000_000
+                if (remainingMs > 0) delay(remainingMs)
+            }
+            if (pcmFrames == null) {
+                val packets = codec.encode(bytes.copyOfRange(44, bytes.size), params)
+                require(packets.isNotEmpty()) { "录音中没有可发送的声音" }
+                for (frame in packets) sendFrame(frame)
+            } else {
+                var pcmBytes = 0
+                val encoder = if (params.format == "opus") withContext(Dispatchers.IO) { StreamingOpusEncoder(params) } else null
+                val pcmPackets = if (params.format == "pcm") PcmPacketizer(params.rate, params.frameMs) else null
+                try {
+                    for (pcm in pcmFrames) {
+                        require(pcm.size == 640)
+                        pcmBytes += pcm.size
+                        require(pcmBytes <= 960000)
+                        val packets = withContext(Dispatchers.IO) {
+                            encoder?.push(pcm) ?: pcmPackets!!.push(AndroidLinxCodec.resample(pcm, 16000, params.rate))
+                        }
+                        for (frame in packets) sendFrame(frame)
+                    }
+                    require(pcmBytes > 0)
+                    if (encoder != null) for (frame in withContext(Dispatchers.IO) { encoder.finish() }) sendFrame(frame)
+                    if (pcmPackets != null) for (frame in pcmPackets.finish()) sendFrame(frame)
+                } finally {
+                    withContext(kotlinx.coroutines.NonCancellable + Dispatchers.IO) { encoder?.close() }
+                }
             }
             send(json("type" to "listen", "state" to "stop", "mode" to "manual"))
+            stage("upload_complete")
             status(if (conversation) "正在等待灵矽回复…" else "正在识别本次录音…")
             val candidates = linkedSetOf<String>()
             val spoken = mutableListOf<String>()
             val output = mutableListOf<ByteArray>()
             var outputSize = 0
             var started = false
+            var routedAway = false
+            var routed = false
+            var firstAudio = true
             val complete =
                 withTimeout(if (conversation) responseMs else minOf(responseMs, 12000)) {
                     while (true) {
-                        val next: Event =
-                            if (!conversation && candidates.isNotEmpty())
-                                withTimeoutOrNull(1200) { events.receive() }
-                                    ?: return@withTimeout true
-                            else events.receive()
-                        when (val event = next) {
+                        val next: Event? =
+                            if (candidates.isNotEmpty() && (!conversation || route != null && !routed))
+                                withTimeoutOrNull(1200) { receive() }
+                            else receive()
+                        if (next == null) {
+                            if (!conversation) return@withTimeout true
+                            routed = true
+                            stage("route_start")
+                            if (!route!!.invoke(candidates.single())) {
+                                routedAway = true
+                                return@withTimeout true
+                            }
+                            stage("route_complete")
+                            continue
+                        }
+                        when (val event = checkNotNull(next)) {
                             is Event.Audio -> {
                                 if (!conversation) continue
                                 check(started) { "灵矽返回了未标记来源的音频" }
@@ -220,7 +287,13 @@ class LinxSession(
                                 check(outputSize <= minOf(6 * 1024 * 1024, params.rate * 2 * 60)) {
                                     "灵矽语音回复过长"
                                 }
-                                output.add(event.value)
+                                if (firstAudio) { stage("first_audio"); firstAudio = false }
+                                if (onPcm == null) output.add(event.value)
+                                else {
+                                    val active = decoder ?: withContext(Dispatchers.IO) { codec.openDecoder(params) }.also { decoder = it }
+                                    val frames = withContext(Dispatchers.IO) { active.push(event.value) }
+                                    for (frame in frames) onPcm(frame)
+                                }
                             }
                             is Event.Text -> {
                                 val j = JSONObject(event.value)
@@ -234,11 +307,13 @@ class LinxSession(
                                             candidates.add(text)
                                             check(candidates.size == 1) { "收到多个识别片段，请重录后核对；本次不会发布" }
                                             recognized(text)
+                                            stage("stt")
                                         }
                                     }
                                     "tts" ->
                                         when (j.text("state")) {
                                             "start" -> {
+                                                stage("tts_start")
                                                 started = true
                                                 if (!conversation) {
                                                     send(
@@ -252,20 +327,35 @@ class LinxSession(
                                                     check(candidates.size == 1) { "尚未取得可核对的语音识别结果" }
                                                     return@withTimeout true
                                                 }
+                                                check(candidates.size == 1) { "尚未取得可核对的本轮识别结果" }
+                                                if (!routed && route != null) {
+                                                    routed = true
+                                                    stage("route_start")
+                                                    if (!route(candidates.single())) {
+                                                        routedAway = true
+                                                        return@withTimeout true
+                                                    }
+                                                    stage("route_complete")
+                                                }
                                             }
                                             "sentence_start" -> {
                                                 val text = j.text("text").take(4000)
                                                 if (text.isNotBlank()) {
                                                     spoken.add(text)
                                                     require(spoken.sumOf { it.length } <= 8000)
+                                                    spokenText(spoken.joinToString(""))
                                                 }
                                             }
                                             "stop" -> {
+                                                stage("tts_stop")
                                                 check(!j.optBoolean("is_aborted")) {
                                                     "灵矽回复已被打断，本次不播放"
                                                 }
                                                 check(started && candidates.size == 1) {
                                                     "灵矽没有返回完整的本轮语音"
+                                                }
+                                                decoder?.let { active ->
+                                                    for (frame in withContext(Dispatchers.IO) { active.finish() }) onPcm?.invoke(frame)
                                                 }
                                                 return@withTimeout true
                                             }
@@ -285,9 +375,10 @@ class LinxSession(
                 require(output.sumOf { OpusPackets.durationUs(it) } <= 60000000) { "灵矽语音回复过长" }
             val audio =
                 if (conversation && output.isNotEmpty()) codec.decode(output, params) else null
-            check(!conversation || audio != null) { "灵矽未返回可播放的语音" }
+            check(!conversation || routedAway || audio != null || onPcm != null && !firstAudio) { "灵矽未返回可播放的语音" }
             return LinxReply(candidates.single(), spoken.joinToString(""), audio, params)
         } finally {
+            withContext(kotlinx.coroutines.NonCancellable + Dispatchers.IO) { decoder?.close() }
             runCatching { send(json("type" to "abort", "reason" to "wake_word_detected")) }
             events.cancel()
             socket.close(1000, "clip complete")

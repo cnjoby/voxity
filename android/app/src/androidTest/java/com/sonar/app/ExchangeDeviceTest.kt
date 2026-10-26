@@ -57,7 +57,7 @@ class ExchangeDeviceTest {
     private fun profile() = json("user_id" to "isolated", "revision" to 1, "mode" to mode,
         "assist_enabled" to true, "focus" to "路况", "presence" to json("source" to "android", "place_id" to "road"))
     private fun session(): JSONObject = json("id" to "isolated-session", "revision" to revision,
-        "state" to sessionState, "place_id" to "road", "interaction_mode" to "voice_first", "remote" to false,
+        "state" to sessionState, "place_id" to "road", "interaction_mode" to "voice_first", "client_managed_voice" to true, "remote" to false,
         "auto_publish" to false, "auto_play" to true, "voice_policy" to json("continuous_share" to false),
         "expires_at" to Instant.now().plusSeconds(600))
     private fun delivery() = json("id" to "original", "type" to "audio", "question_id" to "scene",
@@ -492,6 +492,21 @@ class ExchangeDeviceTest {
         compose.waitUntil(10000) { vm.state.value.taskNotice.contains("失效") && vm.state.value.playing == null }
         assertEquals(1, downloads.get())
         assertFalse(requests.any { it.endsWith("/ack") || it.endsWith("/utterances") })
+    }
+
+    @Test fun waitingForAssistantDoesNotStillShowSending() {
+        try {
+            compose.runOnIdle { ExchangeRuntime.mutable.value = ExchangeState(owned = true,
+                phase = "processing", message = "录音已发出，等待声呐处理") }
+            compose.onNodeWithText("声呐正在处理").assertExists()
+            compose.onNodeWithText("正在发送").assertDoesNotExist()
+            compose.runOnIdle { ExchangeRuntime.mutable.value = ExchangeState(owned = true,
+                phase = "assistant_wait", message = "正在等待灵矽回复…") }
+            compose.onNodeWithText("正在准备回复").assertExists()
+            compose.onNodeWithText("正在等待灵矽回复…").assertExists()
+            compose.onNodeWithText("正在发送").assertDoesNotExist()
+            screenshot("assistant-wait")
+        } finally { compose.runOnIdle { ExchangeRuntime.mutable.value = ExchangeState() } }
     }
 
     @Test fun activeViewShowsRealRemoteProvenanceWithoutTaskOrModeUI() {

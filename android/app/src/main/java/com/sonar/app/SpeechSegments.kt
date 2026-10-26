@@ -10,6 +10,8 @@ class SpeechSegments(
     private val onSegment: (ByteArray, Boolean) -> Unit,
     private val threshold: Double = 700.0,
     private val tailFrames: Int = 60,
+    private val onFrame: (ByteArray) -> Unit = {},
+    private val onVoiced: () -> Unit = {},
 ) {
     private val preRoll = ArrayDeque<ByteArray>()
     private var samples = ByteArrayOutputStream()
@@ -27,6 +29,7 @@ class SpeechSegments(
     fun accept(frame: ByteArray) {
         require(frame.size == 640)
         val speech = rms(frame) > threshold
+        if (speech) onVoiced()
         if (waitForSilence) {
             cooldown = if (speech) 0 else cooldown + 1
             if (cooldown >= tailFrames) { waitForSilence = false; cooldown = 0 }
@@ -40,7 +43,7 @@ class SpeechSegments(
                 speaking = true
                 onStart() // Stop playback locally, before any ASR/network result.
                 samples = ByteArrayOutputStream(960000)
-                preRoll.forEach { samples.write(it) }
+                preRoll.forEach { samples.write(it); onFrame(it.copyOf()) }
                 preRoll.clear()
                 voiced = leading
                 quiet = 0
@@ -48,7 +51,7 @@ class SpeechSegments(
             }
             return
         }
-        if (samples.size() < 960000) samples.write(frame)
+        if (samples.size() < 960000) { samples.write(frame); onFrame(frame.copyOf()) }
         else truncated = true
         if (speech) { voiced++; quiet = 0 } else quiet++
         if (quiet >= tailFrames || samples.size() >= 960000) {
