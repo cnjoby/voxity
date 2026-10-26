@@ -1,6 +1,8 @@
 # 声呐 Sonar｜当前实现架构、模块规格与分工
 
-核对日期：2026-10-26。范围为本仓库当前源码：Android 0.3.0/code11，以及包含单次语音上行、终端托管业务动作、Opus和回复修复的服务端；[实现与验收记录](../development/low-latency-opus-20261026.md)区分源码、部署和实机状态。本文件描述已落在代码中的边界；[产品架构](product-architecture.md)中的事件系统、治理与商业试点规划不因此视为已交付。运行入口见[运行指南](../RUNNING.md)。
+核对日期：2026-10-27（Asia/Shanghai）。源码基线为 `2dce542`，Android **0.3.6/code17**；本次只读复核生产目录为 **`20261027-modaily-alias-040`**，服务 active、健康检查通过，OpenAPI `info.version=0.3.0`。API版本、Android版本与部署目录分别记录，不要求编号相同。ESP32子模块固定公开主线 **`60e1a1e`**，不表示实体设备已烧录该提交。
+
+本文件为当前实现的架构入口；[低延迟方案](low-latency-architecture-20261026.md)保留目标与历史瓶颈，[实现记录](../development/low-latency-opus-20261026.md)、[手机平台与Opus修复](../development/voice-start-fix-20261026.md)、[最新双端验收](../development/esp32-reply-failure-20261027.md#040之后的真实往返)分别提供交付证据。[产品架构](product-architecture.md)中的完整事件系统、治理与商业试点仍为规划。启动、构建和配置见[运行指南](../RUNNING.md)。
 
 ## 1. 部署与调用关系
 
@@ -15,12 +17,36 @@ flowchart TB
     L <-->|受保护 MCP / 可信设备映射| H
     H --> S[Service 与业务规则模块]
     S --> DB[(SQLite WAL)]
-    S --> WAV[原声文件]
+    S --> WAV[原声文件：Ogg Opus / WAV]
     S <-->|POI、天气、路线| G[高德]
     S <-->|语义意图与模型标记| B[Bamboo / StartLux]
 ```
 
 自有服务是单机单进程模块化单体，不为每个用户启动独立 Agent 服务。`Service` 通过规则类组合业务能力；复用方法不意味着共享用户任务、授权或私人上下文。Caddy 负责公开入口，systemd 或备选 Compose 管理进程。手机录放、云端语音和业务 API 是可独立失败的链路。
+
+### 低延迟语音关键路径
+
+```mermaid
+flowchart LR
+    M[单麦克风 PCM / VAD] --> C[CapturingTurn 有界帧队列]
+    C --> V[本地增量控制识别]
+    C --> L[每轮一个 Linx WSS / Opus 上行]
+    C --> O[本地原声缓冲 / Ogg Opus]
+    L --> T[同轮 STT 候选收敛]
+    V --> G[控制排除与业务授权]
+    T --> G
+    O --> H[一次 HTTPS 业务提交]
+    G --> H
+    H --> R{业务结果}
+    R -->|private_chat| P[接续同次 Linx 回复 / 增量解码 / 流式播放]
+    R -->|问人、回复、查询或控制| B[中止或丢弃预生成回复 / 执行业务结果]
+```
+
+采音、本地控制识别与云端传输重叠，私人聊天不再第二次上传同一录音；WSS仍每轮建立，不宣称跨轮复用。`AudioCoordinator`约200ms起播缓冲，正常结束等待实际播放排空，安静/结束清空待播音频。保留1.2秒VAD尾静音与STT候选收敛检查；没有供应商保证的final转写时不假定它已经final。原声播放、合成回复和系统提示共用单路播放门禁。
+
+终端托管会话由Sonar HTTP拥有业务执行权；平台Agent须先移除会重复执行动作的工具，再由运营加入`SONAR_MANAGED_VOICE_VERIFIED_AGENTS`。本次生产只读核对：Android/Alice的`client_managed_voice=true`，ESP32/Bob为false；两者上传格式均为`wav`、`ogg_opus`。这是各自平台接入方式的差异。托管会话期间及其迟到回调的Sonar MCP写操作被拒绝，第三方平台工具仍需独立隔离。
+
+HTTP上传/存储使用单声道Ogg Opus，Android目标24kbps；Linx WSS使用hello协商的裸Opus包，不能直接发送Ogg文件。下载按原格式返回`audio/ogg`或`audio/wav`，历史WAV不批量转码；Android两者均可播放，固件须按实际格式解封装/解码。5秒合成样本从160,044字节降至22,503字节，减少85.94%，不代表所有录音的固定压缩率或车内音质。[格式合同与隔离HTTP验证](../development/opus-interface-20261026.md)。
 
 ## 2. 服务端模块规格
 
@@ -44,6 +70,7 @@ flowchart TB
 | 注意力与模型：`decision.py`、`attention_worker.py` | 合法候选与本人关注 → 模型 notify/defer/ignore 标记 | 当前有效 question 邀请采用 conversation_first，模型不阻断；安静、资格、权限和期限仍是硬约束；scene 保留相关性筛选 | 后端与模型接入 / `test_attention_flow.py`、`test_decision.py`、`test_conversation_first.py` |
 | 音频与持久化：`audio.py`、`storage.py`、`schema.sql` | Ogg Opus或完整WAV与事务操作 → 不可变音频及一致数据库 | 单声道Opus或16kHz/16-bit PCM，实际解码最长30秒；文件最多1000KiB，multipart总体1MiB；压缩原声原样保存/下载；SQLite WAL与外键 | 后端 / `test_opus.py`、`test_core.py`、`test_async_storage.py` |
 | MCP：`mcp.py` | 独立 Bearer + 可信 Device/Agent/Session → 受限业务工具 | Streamable HTTP 与旧 SSE；每次核验身份和归属；无设备上下文不能操作个人状态 | 平台接入与后端 / `test_mcp.py`、[平台记录](../development/linx-platform.md) |
+| 信息时效：`service.py`、`day_validity.py` | 发布时刻、信息类型与策略 → 截止时间及显式迁移 | 生产普通动态信息按北京时间发布当日24:00截止；线程受原问题截止限制；长期公告直到撤回；定位/会话时效独立 | 后端 / `test_day_validity.py` |
 | 配置、导入与运维：`config.py`、`cli.py`、`operator_cli.py`、`demo_audio.py`、`poi_notices.py` | 本地配置、授权命令与合成素材清单 → 初始化、授权或幂等导入 | 凭证不入库明文、不输出；素材哈希核对；导入须显式执行 | 后端与发布 / `test_demo_audio.py`、`test_standing_notices.py` |
 
 源码位于 `server/app/`，测试位于 `server/tests/`；文件均相对仓库根目录。完整字段以 [v1 Schema](../development/contracts/v1/schemas.json)、[契约说明](../development/contracts.md)及运行时 `/openapi.json` 为准。
@@ -57,9 +84,9 @@ flowchart TB
 | 界面：`MainActivity.kt`、`SonarScreen.kt`、`ExchangePanel.kt`、`VoicePanel.kt`、`LinxPanel.kt` | 准备、开始、活跃/安静状态、地点及设置 | 用户显式开始，不把配置过程混入行车交流；Android/体验 |
 | 界面编排：`SonarViewModel.kt`、`Models.kt` | API/配置/定位结果 → UI 状态与用户动作 | 不把请求成功等同实际播放；Android |
 | 前台语音运行：`ExchangeService.kt` | 采集轮次、STT、服务端动作、轮询交付 → 私有回应或原声播放 | 用户动作启动；通知/生命周期管理；非 sticky 重启；本地安静与终止优先；Android |
-| 音频：`AudioCoordinator.kt`、`ExchangeCapture.kt`、`SpeechSegments.kt`、`OpusFiles.kt` | PCM帧、VAD、音频焦点、Ogg Opus → 有界录音、压缩传输或流式播放 | 单麦克风/单路播放、系统打断、单轮上限和静音边界；流式回声参考；Android/音频 |
+| 音频：`AudioCoordinator.kt`、`ExchangeCapture.kt`、`SpeechSegments.kt`、`OpusFiles.kt`、`UploadAudioCache.kt` | PCM帧、VAD、音频焦点、Ogg Opus → 有界录音、压缩传输或流式播放 | 单麦克风/单路播放、系统打断、单轮上限和静音边界；流式回声参考；Android/音频 |
 | 本地控制与回声：`LocalSpeechCommands.kt`、`PlaybackEchoGuard.kt` | 离线中文识别与播放上下文 → 控制动作或回声抑制 | Vosk 固定校验；网络失败仍需本地停止；真实车内 AEC/误触发单验；Android/音频 |
-| 反馈与来源：`VoiceFeedback.kt`、`AgentSpeech.kt`、`SourcePresentation.kt` | 提交结果、Agent 文本、来源信息 → 回执提示、中文 TTS 和显示 | 真人回复保留原 WAV；Agent 使用合成语音；原声增益为播放派生，不覆盖服务器原文件；Android |
+| 反馈与来源：`VoiceFeedback.kt`、`AgentSpeech.kt`、`SourcePresentation.kt` | 提交结果、Agent 文本、来源信息 → 回执提示、中文 TTS 和显示 | 真人回复保留原始Ogg Opus/WAV；Agent使用合成语音；原声增益为播放派生，不覆盖服务器原文件；Android |
 | 业务网络：`SonarApi.kt` | 业务 Token、冻结请求 ID/revision → HTTP 结果或已鉴权音频 | 不混用灵矽凭证；不凭旧版本播放；Android/后端共同维护契约 |
 | 灵矽接入：`LinxGateway.kt`、`LinxSession.kt`、`LinxCodec.kt`、`CapturingTurn.kt`、`StreamingOpusEncoder.kt`、`StreamingOpusDecoder.kt` | 设备绑定、实时帧与WSS → 同轮STT/流式私人回复 | 一轮一次识别，业务结果控制出声；OTA/WSS身份独立；超时不自动公开；Android/平台接入 |
 | 本地状态：`TaskStore.kt`、`AckReconciler.kt` | 私有设备配置、草稿、回执 → 加密配置和重试台账 | Keystore 保护配置；任务按服务器/用户范围隔离；未知结果核对、不盲目重发；Android |
@@ -96,7 +123,13 @@ JVM 规则测试位于 `src/test/`；Android runtime、界面和可选真实链�
 
 ## 6. 当前交付与已知边界
 
-- 当前上传包含全部现有 Android/服务端应用源码、测试、脚本、依赖锁定、部署模板、协议与产品/工程文档，以及最新现有 PPT。
-- ESP32 固件由同事更新；`firmware/esp32` 以子模块引用原私有仓库的 `feature/sonar-voice-client` 分支，获取源码需要对应权限；[模块与构建/更新方法](../../firmware/README.md)单列，固件应用与后端兼容性仍须联调。外部灵矽、高德、Bamboo 服务的实现源码不属于本仓库。
-- 本轮只做源码交付与软件验证，不重新部署或触碰设备。此前生产/手机证据按日期保留于[会话优先修复记录](../development/conversation-first-20261026.md)；不能替代上传时重新验收。
-- 长连接、实体喇叭、双向持续真人聊天、锁屏和车内声学仍按实际终端验收；多进程扩容、实时多人对讲、完整事件治理和商业试点不在当前实现范围内。
+| 层次 | 当前证据与限制 |
+| --- | --- |
+| 源码与软件检查 | Android0.3.6/code17、服务端当前源码已纳入Git；最近完整记录为284项服务端测试及Ruff、64项Android JVM测试及Lint/构建。此次文档同步未重跑应用测试 |
+| 生产 | 本次只读确认040仍在线、健康正常，OpenAPI下载列出WAV/Ogg，手机托管语音已放行，ESP32保持独立配置；此次未部署、修改配置或写入演示内容 |
+| Android实机 | 0.3.6已安装；删除旧问题后启动恢复3项真机回归通过，手机Opus上传和私人流式回复已有实测，见各日期记录 |
+| 双端真实听感 | 2026-10-27用户确认现有Android自动播问题、现有ESP32播回答，一轮双向闭环通过；设备回执与用户确认分别记录，不据此推定长期稳定性 |
+| 固件源码与实体设备 | 公开仓库`ma6174/ai-passport`的`main`固定60e1a1e，含Sonar及异步Ogg播放修复；主机/构建门禁通过，该固定版本未烧录。现有板子运行版本未核实；本地旧候选补丁另存，不混入主线 |
+| 性能与未来工作 | 尚无最新版本同机同网30轮P50/P95和失败率验收，不能宣布达到低延迟目标。SSE业务通知、后台scene筛选、独立STT/文本/TTS适配器、VAD调参仍待实现/验证；长时间运行、弱网、锁屏、车内AEC和板端内存余量另验 |
+
+当前仓库覆盖Android、服务端、测试、脚本、依赖锁定、部署模板、协议、工程/产品文档和路演资料；外部Linx、高德、Bamboo的实现源码与凭证不属于本仓库。固件获取及构建见[固件入口](../../firmware/README.md)。多进程扩容、实时多人对讲、完整事件治理和商业试点不在当前交付范围内。

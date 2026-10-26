@@ -1,6 +1,8 @@
 # 音频格式核对：历史WAV与新Ogg Opus
 
-日期：2026-10-26，Asia/Shanghai。当前生产：`20261026-opus-contract-031`。030已支持Opus；031补齐OpenAPI版本、二进制类型与上传描述，增加确切的Opus utterance验证。
+当前状态见[主架构（2026-10-27）](../design/module-specs.md)：生产已更新至040，双格式合同继续适用，手机托管语音后续已核验放行。下文为031发布时的验证快照。
+
+日期：2026-10-26，Asia/Shanghai。本记录生产：`20261026-opus-contract-031`。030已支持Opus；031补齐OpenAPI版本、二进制类型与上传描述，增加确切的Opus utterance验证。
 
 ## Android与历史素材
 

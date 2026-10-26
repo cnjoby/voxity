@@ -15,7 +15,7 @@
 | 交付内容 | 入口 |
 | --- | --- |
 | 下载、依赖、启动、构建、安装与使用 | [完整运行指南](docs/RUNNING.md) |
-| 当前实现、模块规格、接口、状态所有权与角色分工 | [架构与模块规格](docs/design/module-specs.md) |
+| 当前实现（2026-10-27）、低延迟/Opus链路、模块、状态所有权与分工 | [架构与模块规格](docs/design/module-specs.md) |
 | 同事维护的 ESP32 固件、固定版本及获取/更新方法 | [固件入口](firmware/README.md) |
 | 产品定义、六要素消息、业务线与下一阶段设计 | [产品架构](docs/design/product-architecture.md) |
 | 最新现有 PPT、讲述备注、内嵌/独立原理动画 | [路演材料](docs/presentations/README.md) |

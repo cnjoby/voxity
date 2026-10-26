@@ -1,6 +1,6 @@
 # 0.3.0：单次语音上行、流式播放与 Opus
 
-当前生产031的音频格式、OpenAPI与隔离curl验证见[接口核对](opus-interface-20261026.md)；下文保留030实现与复审记录。
+当前状态见[主架构（2026-10-27）](../design/module-specs.md)：Android0.3.6、生产040；手机托管语音已核验放行。031的音频格式、OpenAPI与隔离curl验证见[接口核对](opus-interface-20261026.md)；下文保留030实现、门禁及复审的历史快照，不作为当前运行状态。
 
 日期：2026-10-26，Asia/Shanghai。当前源码与候选 APK：Android **0.3.0/code11**。基于[低延迟架构方案](../design/low-latency-architecture-20261026.md)落实语音关键路径；按用户要求只维护最新版，不提供旧客户端的 WAV 下载转换分支。
 
