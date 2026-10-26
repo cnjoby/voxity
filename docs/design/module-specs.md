@@ -27,19 +27,19 @@ flowchart TB
 ### 低延迟语音关键路径
 
 ```mermaid
-flowchart LR
+flowchart TB
     M[单麦克风 PCM / VAD] --> C[CapturingTurn 有界帧队列]
     C --> V[本地增量控制识别]
-    C --> L[每轮一个 Linx WSS / Opus 上行]
-    C --> O[本地原声缓冲 / Ogg Opus]
+    C --> L[每轮一个 Linx WSS<br/>Opus 实时上行]
+    C --> O[本地原声缓冲<br/>Ogg Opus]
     L --> T[同轮 STT 候选收敛]
     V --> G[控制排除与业务授权]
     T --> G
     O --> H[一次 HTTPS 业务提交]
     G --> H
     H --> R{业务结果}
-    R -->|private_chat| P[接续同次 Linx 回复 / 增量解码 / 流式播放]
-    R -->|问人、回复、查询或控制| B[中止或丢弃预生成回复 / 执行业务结果]
+    R -->|private_chat| P[接续同次 Linx 回复<br/>增量解码 / 流式播放]
+    R -->|其他业务| B[中止或丢弃预生成回复<br/>按业务结果回应]
 ```
 
 采音、本地控制识别与云端传输重叠，私人聊天不再第二次上传同一录音；WSS仍每轮建立，不宣称跨轮复用。`AudioCoordinator`约200ms起播缓冲，正常结束等待实际播放排空，安静/结束清空待播音频。保留1.2秒VAD尾静音与STT候选收敛检查；没有供应商保证的final转写时不假定它已经final。原声播放、合成回复和系统提示共用单路播放门禁。
